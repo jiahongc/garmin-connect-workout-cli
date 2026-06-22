@@ -1,0 +1,174 @@
+name: garmin-connect-workouts
+description: "Create Garmin-ready running workouts from plain English, preview them safely, then upload and schedule only when approved."
+version: "0.1.0"
+category: health
+base_url: "https://connectapi.garmin.com"
+http_transport: standard
+health_check_path: "/workout-service/workout/types"
+required_headers:
+  - name: User-Agent
+    value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+auth:
+  type: bearer_token
+  header: "Authorization"
+  format: "Bearer {token}"
+  env_vars:
+    - GARMIN_CONNECT_ACCESS_TOKEN
+auth_warnings:
+  - "Garmin Connect consumer endpoints are unofficial and auth-sensitive. Prefer local token/session reuse and explicit write commands."
+config:
+  format: toml
+  path: "~/.config/garmin-connect-workouts/config.toml"
+resources:
+  workouts:
+    description: "Manage Garmin Connect workout templates"
+    endpoints:
+      types:
+        method: GET
+        path: "/workout-service/workout/types"
+        description: "List Garmin workout type metadata"
+        response:
+          type: object
+          item: WorkoutTypes
+      list:
+        method: GET
+        path: "/workout-service/workout"
+        description: "List Garmin Connect workouts"
+        params:
+          - name: limit
+            type: int
+            default: 20
+            description: "Maximum workouts to return"
+        response:
+          type: array
+          item: Workout
+      get:
+        method: GET
+        path: "/workout-service/workout/{workout_id}"
+        description: "Get a Garmin Connect workout by ID"
+        params:
+          - name: workout_id
+            type: string
+            required: true
+            positional: true
+            description: "Garmin workout ID"
+        response:
+          type: object
+          item: Workout
+      upload-json:
+        method: POST
+        path: "/workout-service/workout"
+        description: "Upload a raw Garmin workout JSON payload"
+        body:
+          - name: workout_json
+            flag_name: workout-json
+            type: string
+            required: true
+            description: "Raw Garmin workout JSON object"
+        response:
+          type: object
+          item: Workout
+      delete:
+        method: DELETE
+        path: "/workout-service/workout/{workout_id}"
+        description: "Delete a Garmin Connect workout template"
+        params:
+          - name: workout_id
+            type: string
+            required: true
+            positional: true
+            description: "Garmin workout ID"
+  schedule:
+    description: "Manage Garmin Connect scheduled workouts"
+    endpoints:
+      get:
+        method: GET
+        path: "/workout-service/schedule/{scheduled_workout_id}"
+        description: "Get a scheduled workout by ID"
+        params:
+          - name: scheduled_workout_id
+            type: string
+            required: true
+            positional: true
+            description: "Garmin scheduled workout ID"
+        response:
+          type: object
+          item: ScheduledWorkout
+      create:
+        method: POST
+        path: "/workout-service/schedule/{workout_id}"
+        description: "Schedule a workout on a Garmin Connect calendar date"
+        params:
+          - name: workout_id
+            type: string
+            required: true
+            positional: true
+            description: "Garmin workout ID"
+        body:
+          - name: date
+            type: string
+            required: true
+            format: date
+            description: "Schedule date in YYYY-MM-DD format"
+        response:
+          type: object
+          item: ScheduledWorkout
+      delete:
+        method: DELETE
+        path: "/workout-service/schedule/{scheduled_workout_id}"
+        description: "Remove a scheduled workout from the calendar"
+        params:
+          - name: scheduled_workout_id
+            type: string
+            required: true
+            positional: true
+            description: "Garmin scheduled workout ID"
+types:
+  WorkoutTypes:
+    fields:
+      - name: sportTypes
+        type: array
+        description: "Garmin sport types"
+      - name: stepTypes
+        type: array
+        description: "Garmin workout step types"
+      - name: conditionTypes
+        type: array
+        description: "Garmin end-condition types"
+      - name: targetTypes
+        type: array
+        description: "Garmin workout target types"
+  Workout:
+    fields:
+      - name: workoutId
+        type: string
+        description: "Garmin workout ID"
+      - name: workoutName
+        type: string
+        description: "Workout name"
+      - name: description
+        type: string
+        description: "Workout description"
+      - name: sportType
+        type: object
+        description: "Garmin sport type"
+      - name: estimatedDurationInSecs
+        type: int
+        description: "Estimated workout duration in seconds"
+      - name: workoutSegments
+        type: array
+        description: "Garmin workout segments"
+  ScheduledWorkout:
+    fields:
+      - name: scheduledWorkoutId
+        type: string
+        description: "Garmin scheduled workout ID"
+      - name: workoutId
+        type: string
+        description: "Garmin workout ID"
+      - name: date
+        type: string
+        description: "Scheduled date"
+      - name: workout
+        type: object
+        description: "Scheduled workout details"
