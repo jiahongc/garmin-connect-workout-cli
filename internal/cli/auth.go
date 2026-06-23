@@ -149,7 +149,7 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login-browser",
 		Short: "Login through Garmin Connect in Chrome",
-		Long:  "Opens a visible Chrome window. Sign in to Garmin Connect there; the CLI verifies the signed-in browser profile that later workout writes use headlessly.",
+		Long:  "Opens a visible Chrome window. Sign in to Garmin Connect there; the CLI verifies the signed-in browser profile and saves a local Garmin web session for later workout writes.",
 		Example: strings.Join([]string{
 			"  garmin-connect-workout-cli auth login-browser",
 			"  garmin-connect-workout-cli auth login-browser --timeout 5m",
@@ -180,21 +180,27 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 
 			fmt.Fprintln(cmd.ErrOrStderr(), "Opening Chrome for Garmin Connect login.")
 			fmt.Fprintln(cmd.ErrOrStderr(), "Sign in and complete MFA in the browser. Leave this terminal open.")
-			err := verifyGarminBrowserProfile(cmd.Context(), profileDir, timeout)
+			session, err := verifyGarminBrowserProfile(cmd.Context(), profileDir, timeout)
 			if err != nil {
 				return authErr(err)
+			}
+			sessionPath, err := garminsession.Save(session)
+			if err != nil {
+				return authErr(fmt.Errorf("capturing Garmin browser session: %w", err))
 			}
 			out := map[string]any{
 				"authenticated":   true,
 				"browser_profile": profileDir,
+				"web_session":     sessionPath,
 				"verified_at":     time.Now().UTC(),
 			}
 			if flags.asJSON || flags.agent {
 				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "Garmin browser profile is signed in.")
-			fmt.Fprintln(cmd.OutOrStdout(), "Workout writes will use this profile headlessly.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Garmin web session saved for workout writes.")
 			fmt.Fprintf(cmd.OutOrStdout(), "Browser profile: %s\n", profileDir)
+			fmt.Fprintf(cmd.OutOrStdout(), "Web session: %s\n", sessionPath)
 			return nil
 		},
 	}
@@ -203,7 +209,7 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 	return cmd
 }
 
-func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeout time.Duration) error {
+func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -219,8 +225,14 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 
-	if err := chromedp.Run(ctx, chromedp.Navigate("https://connect.garmin.com/app/workouts")); err != nil {
-		return fmt.Errorf("opening Garmin Connect in Chrome: %w", err)
+	capture := &webSessionCapture{}
+	startGarminSessionCapture(ctx, capture)
+
+	if err := chromedp.Run(ctx,
+		network.Enable(),
+		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
+	); err != nil {
+		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in Chrome: %w", err)
 	}
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -232,15 +244,15 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 		select {
 		case <-ctx.Done():
 			if lastStatus != 0 {
-				return fmt.Errorf("timed out waiting for Garmin browser login; last Garmin API status was HTTP %d", lastStatus)
+				return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; last Garmin API status was HTTP %d", lastStatus)
 			}
-			return fmt.Errorf("timed out waiting for Garmin browser login; sign in and complete MFA in Chrome")
+			return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; sign in and complete MFA in Chrome")
 		case <-ticker.C:
 			location, err := browserLocation(ctx)
 			if err == nil && location != "" {
 				lastLocation = location
 			} else if err != nil && !isTransientChromeContextError(err) {
-				return err
+				return garminsession.Session{}, err
 			}
 			if time.Now().After(nextStatus) {
 				nextStatus = time.Now().Add(10 * time.Second)
@@ -255,13 +267,20 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 				if isTransientChromeContextError(err) {
 					continue
 				}
-				return err
+				return garminsession.Session{}, err
 			}
 			if status != 0 {
 				lastStatus = status
 			}
 			if status >= 200 && status < 300 && !bodyLooksLikeHTML(body) {
-				return nil
+				markGarminSessionSeen(capture)
+				session, ok, err := currentCapturedSession(ctx, capture)
+				if err != nil {
+					return garminsession.Session{}, err
+				}
+				if ok && session.Active(time.Now()) {
+					return session, nil
+				}
 			}
 		}
 	}
@@ -310,23 +329,7 @@ type webSessionCapture struct {
 	seenAPI       bool
 }
 
-func captureGarminWebSession(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
-	opts := []chromedp.ExecAllocatorOption{
-		chromedp.NoFirstRun,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.Flag("headless", false),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.UserDataDir(profileDir),
-		chromedp.WindowSize(1280, 900),
-	}
-	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
-	defer allocCancel()
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
-
-	capture := &webSessionCapture{}
+func startGarminSessionCapture(ctx context.Context, capture *webSessionCapture) {
 	chromedp.ListenTarget(ctx, func(ev any) {
 		req, ok := ev.(*network.EventRequestWillBeSent)
 		if !ok || !isGarminSessionRequest(req.Request.URL) {
@@ -348,6 +351,32 @@ func captureGarminWebSession(parent context.Context, profileDir string, timeout 
 		}
 		capture.mu.Unlock()
 	})
+}
+
+func markGarminSessionSeen(capture *webSessionCapture) {
+	capture.mu.Lock()
+	capture.seenAPI = true
+	capture.mu.Unlock()
+}
+
+func captureGarminWebSession(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
+	opts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("headless", false),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.UserDataDir(profileDir),
+		chromedp.WindowSize(1280, 900),
+	}
+	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
+	defer allocCancel()
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+
+	capture := &webSessionCapture{}
+	startGarminSessionCapture(ctx, capture)
 
 	if err := chromedp.Run(ctx,
 		network.Enable(),
@@ -404,9 +433,7 @@ func markGarminPageActivity(location string, capture *webSessionCapture) {
 	if !strings.Contains(location, "garmin.com") {
 		return
 	}
-	capture.mu.Lock()
-	capture.seenAPI = true
-	capture.mu.Unlock()
+	markGarminSessionSeen(capture)
 }
 
 func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (garminsession.Session, bool, error) {

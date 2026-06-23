@@ -5,7 +5,30 @@ package cli
 import (
 	"io"
 	"testing"
+
+	"garmin-connect-workout-cli/internal/config"
 )
+
+func TestHasGarminWriteAuth(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{name: "nil config", cfg: nil, want: false},
+		{name: "empty config", cfg: &config.Config{}, want: false},
+		{name: "oauth header", cfg: &config.Config{AuthHeaderVal: "Bearer token"}, want: true},
+		{name: "cookie header", cfg: &config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}}, want: true},
+		{name: "blank cookie header", cfg: &config.Config{Headers: map[string]string{"Cookie": "  "}}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasGarminWriteAuth(tt.cfg); got != tt.want {
+				t.Fatalf("hasGarminWriteAuth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 // TestNovelWorkoutsApplyHelpWires smoke-tests that the workouts apply command
 // resolves at runtime and renders --help without error. Catches wiring

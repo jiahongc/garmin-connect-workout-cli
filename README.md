@@ -43,7 +43,7 @@ What happens:
 - The CLI opens a visible Chrome window.
 - You sign in to Garmin Connect and complete MFA there.
 - The CLI verifies that the browser profile can read Garmin workouts.
-- Later writes use that same browser profile in headless Chrome.
+- The CLI saves a local Garmin web session for later workout writes.
 
 Check local auth state:
 
@@ -159,7 +159,7 @@ Agent safety rules:
 
 Login uses visible Chrome because Garmin sign-in and MFA are interactive.
 
-Workout writes use headless Chrome by default. To debug the browser write path visibly:
+Workout writes use the saved Garmin web session by default. If no saved token or web session is available, the CLI falls back to the browser profile. To debug that fallback visibly:
 
 ```bash
 GARMIN_CONNECT_BROWSER_HEADLESS=0 garmin-connect-workout-cli workouts apply draft_abc123 --apply
@@ -182,4 +182,3 @@ Useful local files:
 
 - Draft history: `~/Library/Application Support/garmin-connect-workout-cli/workout-drafts.json` on macOS.
 - Browser profile: `~/Library/Application Support/garmin-connect-workout-cli/browser-profile` on macOS.
-

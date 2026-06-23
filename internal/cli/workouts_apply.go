@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"garmin-connect-workout-cli/internal/config"
 	"garmin-connect-workout-cli/internal/workoutdraft"
 	"github.com/spf13/cobra"
 )
@@ -104,11 +105,24 @@ func postGarminWorkout(cmd *cobra.Command, flags *rootFlags, path string, body a
 	if err != nil {
 		return nil, 0, err
 	}
-	if c.Config == nil || c.Config.AuthHeader() == "" {
+	if !hasGarminWriteAuth(c.Config) {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Using signed-in Garmin browser profile for this write.")
 		return garminBrowserPostJSON(cmd.Context(), path, body)
 	}
 	return c.Post(cmd.Context(), path, body)
+}
+
+func hasGarminWriteAuth(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if strings.TrimSpace(cfg.AuthHeader()) != "" {
+		return true
+	}
+	if cfg.Headers == nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.Headers["Cookie"]) != ""
 }
 
 func extractResponseID(data []byte, keys ...string) string {
