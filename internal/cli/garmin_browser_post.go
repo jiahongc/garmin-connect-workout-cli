@@ -142,19 +142,37 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 		return nil, 0, fmt.Errorf("posting through Garmin browser session: %w", err)
 	}
 	if parsed.Status < 200 || parsed.Status >= 300 {
-		bodyText := strings.TrimSpace(parsed.Body)
-		if bodyText == "" {
-			bodyText = "<empty body>"
-		}
-		if parsed.Status == 401 || parsed.Status == 403 {
-			return []byte(parsed.Body), parsed.Status, authErr(fmt.Errorf("Garmin browser session is not authenticated; run auth login-browser again"))
-		}
-		return []byte(parsed.Body), parsed.Status, apiErr(fmt.Errorf("Garmin browser %s %s via %s returned HTTP %d: %s", method, path, parsed.BaseURL, parsed.Status, bodyText))
+		return []byte(parsed.Body), parsed.Status, garminBrowserHTTPError(method, path, parsed)
 	}
 	if bodyLooksLikeHTML(parsed.Body) {
 		return []byte(parsed.Body), parsed.Status, authErr(fmt.Errorf("Garmin browser %s %s returned Garmin app HTML, not API JSON; run auth login-browser again", method, path))
 	}
 	return []byte(parsed.Body), parsed.Status, nil
+}
+
+func garminBrowserHTTPError(method string, path string, parsed browserPostResponse) error {
+	bodyText := strings.TrimSpace(parsed.Body)
+	if bodyText == "" {
+		bodyText = "<empty body>"
+	}
+	if parsed.Status == 401 || parsed.Status == 403 {
+		return authErr(fmt.Errorf("Garmin browser session is not authenticated; run auth login-browser again"))
+	}
+	err := fmt.Errorf("Garmin browser %s %s via %s returned HTTP %d: %s", method, path, parsed.BaseURL, parsed.Status, bodyText)
+	if parsed.Status == 429 {
+		return rateLimitErr(fmt.Errorf("%w\nhint: Garmin or Cloudflare is rate limiting workout writes. %s", err, garminRateLimitRetryHint(parsed.Body)))
+	}
+	return apiErr(err)
+}
+
+func garminRateLimitRetryHint(body string) string {
+	var parsed struct {
+		RetryAfter int `json:"retry_after"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err == nil && parsed.RetryAfter > 0 {
+		return fmt.Sprintf("Wait at least %d seconds from retry_after before trying one saved draft again.", parsed.RetryAfter)
+	}
+	return "Wait for the cooldown to clear before trying one saved draft again."
 }
 
 func garminBrowserDefaultHeadless() bool {
