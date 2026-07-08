@@ -1,6 +1,8 @@
 # garmin-connect-workout-cli
 
-A small CLI for creating running workouts in Garmin Connect from plain English.
+A small, unofficial CLI for creating running workouts in Garmin Connect from plain English.
+
+Garmin does not provide a public consumer API for creating workouts. This tool uses the same private Garmin Connect web endpoints the Garmin website uses after you sign in. It may break if Garmin changes those endpoints or blocks automated access.
 
 The main flow is:
 
@@ -17,7 +19,7 @@ Requirements:
 - Chrome
 - A Garmin Connect account
 
-From this repo:
+Install from this repo:
 
 ```bash
 go install ./cmd/garmin-connect-workout-cli
@@ -43,7 +45,9 @@ What happens:
 - The CLI opens a visible Chrome window.
 - You sign in to Garmin Connect and complete MFA there.
 - The CLI verifies that the browser profile can read Garmin workouts.
-- The CLI saves a local Garmin web session for later workout writes.
+- The CLI saves a local Garmin web session for later workout uploads and schedule changes.
+
+The saved browser profile and session are local secrets. Do not share them.
 
 Check local auth state:
 
@@ -62,7 +66,7 @@ garmin-connect-workout-cli auth logout
 Plan a workout first. Planning is local only and does not write to Garmin.
 
 ```bash
-garmin-connect-workout-cli workouts plan "35min E + Drills + 4x20s strides 全程放松，不追配速" \
+garmin-connect-workout-cli workouts plan "35min easy + drills + 4x20s strides relaxed" \
   --date 2026-06-23 \
   --json
 ```
@@ -116,9 +120,9 @@ garmin-connect-workout-cli workouts plan "10 min warmup, 6x800m at 5K pace with 
 Good inputs:
 
 ```text
-35min E + Drills + 4x20s strides
-40min E 炎热时按 RPE 2-3
-30min E + 6x10" Hill Sprint 每次全恢复
+35min easy + drills + 4x20s strides
+40min easy by feel at RPE 2-3
+30min easy + 6x10s hill sprint with full recovery
 10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown
 10 min warmup, 4x1km at 4:30/km with 90 sec jog, 10 min cooldown
 ```
@@ -126,7 +130,7 @@ Good inputs:
 Default recovery rules:
 
 - Strides without recovery: 60 seconds easy recovery.
-- Hill sprints or “full recovery” without a time: 90 seconds recovery.
+- Hill sprints or "full recovery" without a time: 90 seconds recovery.
 - If recovery matters, be explicit: `with 2 min jog`, `with 90 sec walk`, `with 400m jog`.
 
 ## Agent Usage
@@ -159,7 +163,7 @@ Agent safety rules:
 
 Login uses visible Chrome because Garmin sign-in and MFA are interactive.
 
-Workout writes use the saved Garmin web session by default. If no saved token or web session is available, the CLI falls back to the browser profile. To debug that fallback visibly:
+Workout writes are private Garmin Connect web API calls. The CLI uses the saved Garmin web session when possible. If no saved token or web session is available, it falls back to the signed-in browser profile and sends the request from that browser context. To debug that fallback visibly:
 
 ```bash
 GARMIN_CONNECT_BROWSER_HEADLESS=0 garmin-connect-workout-cli workouts apply draft_abc123 --apply
