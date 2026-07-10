@@ -40,15 +40,17 @@ type Workout struct {
 }
 
 type Step struct {
-	Name        string  `json:"name"`
-	StepType    string  `json:"step_type"`
-	DurationSec int     `json:"duration_seconds,omitempty"`
-	Distance    float64 `json:"distance,omitempty"`
-	DistanceUOM string  `json:"distance_unit,omitempty"`
-	Target      string  `json:"target,omitempty"`
-	Notes       string  `json:"notes,omitempty"`
-	Repeat      int     `json:"repeat,omitempty"`
-	Steps       []Step  `json:"steps,omitempty"`
+	Name             string  `json:"name"`
+	StepType         string  `json:"step_type"`
+	EndCondition     string  `json:"end_condition,omitempty"`
+	DurationSec      int     `json:"duration_seconds,omitempty"`
+	Distance         float64 `json:"distance,omitempty"`
+	DistanceUOM      string  `json:"distance_unit,omitempty"`
+	Target           string  `json:"target,omitempty"`
+	Notes            string  `json:"notes,omitempty"`
+	Repeat           int     `json:"repeat,omitempty"`
+	SkipLastRecovery bool    `json:"skip_last_recovery,omitempty"`
+	Steps            []Step  `json:"steps,omitempty"`
 }
 
 type Store struct {
@@ -205,6 +207,9 @@ func parsePrompt(prompt string) ([]Step, []string, error) {
 			steps = append(steps, step)
 			continue
 		}
+		if applyManualRecovery(&steps, raw) {
+			continue
+		}
 		if step, ok := parseSingle(raw); ok {
 			steps = append(steps, step)
 			continue
@@ -279,18 +284,70 @@ func parseTimeRepeat(s string) (Step, bool) {
 		Notes:       strings.TrimSpace(s),
 	}
 	children := []Step{interval}
+	skipLastRecovery := false
 	if recovery, ok := parseRecovery(recoveryText); ok {
 		children = append(children, recovery)
+	} else if recovery, ok := parseManualRecovery(recoveryText); ok {
+		children = append(children, recovery)
+		skipLastRecovery = true
+	} else if recovery, ok := parseManualRecovery(s); ok {
+		children = append(children, recovery)
+		skipLastRecovery = true
 	} else if recovery := defaultRecoveryForRepeat(lower); recovery.DurationSec > 0 {
 		children = append(children, recovery)
 	}
 	return Step{
-		Name:     fmt.Sprintf("%dx%ss %s", repeat, trimFloat(seconds), strings.ToLower(name)),
-		StepType: "repeat",
-		Repeat:   repeat,
-		Steps:    children,
-		Notes:    strings.TrimSpace(s),
+		Name:             fmt.Sprintf("%dx%ss %s", repeat, trimFloat(seconds), strings.ToLower(name)),
+		StepType:         "repeat",
+		Repeat:           repeat,
+		SkipLastRecovery: skipLastRecovery,
+		Steps:            children,
+		Notes:            strings.TrimSpace(s),
 	}, true
+}
+
+func parseManualRecovery(s string) (Step, bool) {
+	text := manualRecoveryText(s)
+	if text == "" {
+		return Step{}, false
+	}
+	if regexp.MustCompile(`(?i)\d+(?:\.\d+)?\s*(?:min|mins|minute|minutes|sec|secs|second|seconds|km|k|m|mi|mile|miles)\b`).MatchString(text) {
+		return Step{}, false
+	}
+	return Step{Name: "Recovery", StepType: "recovery", EndCondition: "lap.button", Notes: text}, true
+}
+
+func manualRecoveryText(s string) string {
+	lower := strings.ToLower(s)
+	first := -1
+	for _, phrase := range []string{"walk down", "jog down", "walk back", "jog back"} {
+		if index := strings.Index(lower, phrase); index >= 0 && (first < 0 || index < first) {
+			first = index
+		}
+	}
+	if first < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[first:])
+}
+
+func applyManualRecovery(steps *[]Step, text string) bool {
+	recovery, ok := parseManualRecovery(text)
+	if !ok || len(*steps) == 0 {
+		return false
+	}
+	last := &(*steps)[len(*steps)-1]
+	if last.StepType != "repeat" || !strings.Contains(strings.ToLower(last.Notes), "hill") {
+		return false
+	}
+	for i := range last.Steps {
+		if last.Steps[i].StepType == "recovery" {
+			last.Steps[i] = recovery
+			last.SkipLastRecovery = true
+			return true
+		}
+	}
+	return false
 }
 
 func defaultRecoveryForRepeat(lower string) Step {
@@ -359,6 +416,11 @@ func parseSingle(s string) (Step, bool) {
 func GarminPayload(w Workout) (map[string]any, int) {
 	order := 1
 	steps, duration := garminSteps(w.Steps, &order)
+	estimatedDuration := any(duration)
+	if hasLapButtonStep(w.Steps) {
+		estimatedDuration = nil
+		duration = 0
+	}
 	description := strings.TrimSpace(w.Name + " - generated from natural language")
 	if len(w.Notes) > 0 {
 		description = strings.TrimSpace(description + "\nNotes: " + strings.Join(w.Notes, "; "))
@@ -371,11 +433,20 @@ func GarminPayload(w Workout) (map[string]any, int) {
 		"estimatedDistanceUnit":     map[string]any{"unitKey": nil},
 		"workoutSegments":           []any{map[string]any{"segmentOrder": 1, "sportType": map[string]any{"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1}, "workoutSteps": steps}},
 		"avgTrainingSpeed":          nil,
-		"estimatedDurationInSecs":   duration,
+		"estimatedDurationInSecs":   estimatedDuration,
 		"estimatedDistanceInMeters": estimatedDistance(w.Steps),
 		"estimateType":              nil,
 	}
 	return payload, duration
+}
+
+func hasLapButtonStep(steps []Step) bool {
+	for _, step := range steps {
+		if step.EndCondition == "lap.button" || hasLapButtonStep(step.Steps) {
+			return true
+		}
+	}
+	return false
 }
 
 func garminSteps(steps []Step, order *int) ([]any, int) {
@@ -386,7 +457,7 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 			id := *order
 			*order++
 			child, childDur := garminSteps(step.Steps, order)
-			out = append(out, map[string]any{
+			group := map[string]any{
 				"stepId":             id,
 				"stepOrder":          id,
 				"stepType":           stepType("repeat"),
@@ -395,7 +466,11 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 				"endCondition":       map[string]any{"conditionTypeId": 7, "conditionTypeKey": "iterations", "displayOrder": 7, "displayable": false},
 				"type":               "RepeatGroupDTO",
 				"workoutSteps":       child,
-			})
+			}
+			if step.SkipLastRecovery {
+				group["skipLastRestStep"] = true
+			}
+			out = append(out, group)
 			total += step.Repeat * childDur
 			continue
 		}
@@ -410,7 +485,9 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 			"stepAudioNote": nil,
 			"targetType":    map[string]any{"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
 		}
-		if step.Distance > 0 {
+		if step.EndCondition == "lap.button" {
+			item["endCondition"] = map[string]any{"conditionTypeId": 1, "conditionTypeKey": "lap.button", "displayOrder": 1, "displayable": true}
+		} else if step.Distance > 0 {
 			meters := distanceMeters(step.Distance, step.DistanceUOM)
 			item["endCondition"] = map[string]any{"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 3, "displayable": true}
 			item["endConditionValue"] = meters

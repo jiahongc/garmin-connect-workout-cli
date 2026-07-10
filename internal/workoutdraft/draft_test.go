@@ -65,6 +65,63 @@ func TestPlanParsesHillSprintsWithFullRecovery(t *testing.T) {
 	}
 }
 
+func TestPlanUsesLapButtonForExplicitHillWalkDownRecovery(t *testing.T) {
+	draft, err := Plan("30 min easy, 6x10s hill sprints with walk down the hill", "2026-07-09", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	steps := segments[0].(map[string]any)["workoutSteps"].([]any)
+	repeat := steps[1].(map[string]any)
+	children := repeat["workoutSteps"].([]any)
+	recovery := children[1].(map[string]any)
+	condition := recovery["endCondition"].(map[string]any)
+	if condition["conditionTypeKey"] != "lap.button" {
+		t.Fatalf("walk-down recovery should wait for the lap button, got %#v", condition)
+	}
+	if _, ok := recovery["endConditionValue"]; ok {
+		t.Fatalf("walk-down recovery should not have a timed end condition: %#v", recovery)
+	}
+	if repeat["skipLastRestStep"] != true {
+		t.Fatalf("walk-down repeats should skip the final recovery, got %#v", repeat)
+	}
+	if draft.Workout.Duration != 0 {
+		t.Fatalf("a lap-button recovery should leave total duration unknown, got %d", draft.Workout.Duration)
+	}
+	if draft.GarminPayload["estimatedDurationInSecs"] != nil {
+		t.Fatalf("a lap-button recovery should not send an estimated duration: %#v", draft.GarminPayload)
+	}
+}
+
+func TestPlanUsesLapButtonWhenWalkDownIsAttachedToHillSprints(t *testing.T) {
+	draft, err := Plan("6x10s hill sprints walk down the hill", "2026-07-09", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	steps := segments[0].(map[string]any)["workoutSteps"].([]any)
+	repeat := steps[0].(map[string]any)
+	children := repeat["workoutSteps"].([]any)
+	condition := children[1].(map[string]any)["endCondition"].(map[string]any)
+	if condition["conditionTypeKey"] != "lap.button" {
+		t.Fatalf("attached walk-down recovery should wait for the lap button, got %#v", condition)
+	}
+}
+
+func TestPlanUsesLapButtonForLongFormHillSprintDuration(t *testing.T) {
+	draft, err := Plan("6x10 sec hill sprints walk down the hill", "2026-07-09", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	steps := segments[0].(map[string]any)["workoutSteps"].([]any)
+	children := steps[0].(map[string]any)["workoutSteps"].([]any)
+	condition := children[1].(map[string]any)["endCondition"].(map[string]any)
+	if condition["conditionTypeKey"] != "lap.button" {
+		t.Fatalf("walk-down recovery should wait for the lap button, got %#v", condition)
+	}
+}
+
 func TestPlanAddsPaceZoneForExplicitPace(t *testing.T) {
 	draft, err := Plan("10 min warmup, 4x1km at 4:30/km with 90 sec jog, 10 min cooldown", "2026-07-08", "")
 	if err != nil {
