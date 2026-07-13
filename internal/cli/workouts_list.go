@@ -17,19 +17,15 @@ func newWorkoutsListCmd(flags *rootFlags) *cobra.Command {
 		Use:         "list",
 		Short:       "List Garmin Connect workouts",
 		Example:     "  garmin-connect-workout-cli workouts list",
-		Annotations: map[string]string{"api:endpoint": "workouts.list", "api:method": "GET", "api:path": "/workout-service/workout", "agent:read-only": "true"},
+		Annotations: map[string]string{"api:endpoint": "workouts.list", "api:method": "GET", "api:path": "/workout-service/workouts", "agent:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := flags.newClient()
 			if err != nil {
 				return err
 			}
 
-			path := "/workout-service/workout"
-			params := map[string]string{}
-			if flagLimit != 0 {
-				params["limit"] = formatCLIParamValue(flagLimit)
-			}
-			data, prov, err := resolveReadWithStrategy(cmd.Context(), c, flags, "auto", "workouts", true, path, params, nil, cmd.ErrOrStderr())
+			path, params := garminWorkoutsListRequest(flagLimit)
+			data, prov, err := resolveGarminWorkoutRead(cmd.Context(), c, flags, true, path, params, cmd.ErrOrStderr())
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}
@@ -82,4 +78,12 @@ func newWorkoutsListCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().IntVar(&flagLimit, "limit", 20, "Maximum workouts to return")
 
 	return cmd
+}
+
+func garminWorkoutsListRequest(limit int) (string, map[string]string) {
+	params := map[string]string{"start": "0"}
+	if limit != 0 {
+		params["limit"] = formatCLIParamValue(limit)
+	}
+	return "/workout-service/workouts", params
 }

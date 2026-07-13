@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -254,20 +255,20 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 			} else if err != nil && !isTransientChromeContextError(err) {
 				return garminsession.Session{}, err
 			}
-			if time.Now().After(nextStatus) {
-				nextStatus = time.Now().Add(10 * time.Second)
-				if lastLocation == "" {
-					fmt.Fprintln(os.Stderr, "Waiting for Garmin browser login...")
-				} else {
-					fmt.Fprintf(os.Stderr, "Waiting for Garmin browser login from: %s\n", lastLocation)
-				}
+			if !time.Now().After(nextStatus) || !shouldProbeGarminLogin(lastLocation) {
+				continue
 			}
+			nextStatus = time.Now().Add(10 * time.Second)
+			fmt.Fprintf(os.Stderr, "Checking Garmin browser login from: %s\n", lastLocation)
 			status, body, err := browserWorkoutListProbe(ctx)
 			if err != nil {
 				if isTransientChromeContextError(err) {
 					continue
 				}
 				return garminsession.Session{}, err
+			}
+			if status == 429 {
+				return garminsession.Session{}, rateLimitErr(fmt.Errorf("Garmin rate limited browser-login verification. %s", garminRateLimitRetryHint(body)))
 			}
 			if status != 0 {
 				lastStatus = status
@@ -284,6 +285,11 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 			}
 		}
 	}
+}
+
+func shouldProbeGarminLogin(location string) bool {
+	parsed, err := url.Parse(location)
+	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com" && strings.HasPrefix(parsed.Path, "/app/")
 }
 
 func browserWorkoutListProbe(ctx context.Context) (int, string, error) {
@@ -322,35 +328,55 @@ func browserWorkoutListProbe(ctx context.Context) (int, string, error) {
 }
 
 type webSessionCapture struct {
-	mu            sync.Mutex
-	authorization string
-	cookie        string
-	userAgent     string
-	seenAPI       bool
+	mu             sync.Mutex
+	authorization  string
+	cookie         string
+	userAgent      string
+	seenAPI        bool
+	garminRequests map[network.RequestID]struct{}
 }
 
 func startGarminSessionCapture(ctx context.Context, capture *webSessionCapture) {
 	chromedp.ListenTarget(ctx, func(ev any) {
-		req, ok := ev.(*network.EventRequestWillBeSent)
-		if !ok || !isGarminSessionRequest(req.Request.URL) {
-			return
+		switch event := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			if !isGarminSessionRequest(event.Request.URL) {
+				return
+			}
+			capture.mu.Lock()
+			if capture.garminRequests == nil {
+				capture.garminRequests = map[network.RequestID]struct{}{}
+			}
+			capture.garminRequests[event.RequestID] = struct{}{}
+			capture.seenAPI = true
+			capture.mu.Unlock()
+			captureGarminSessionHeaders(capture, event.Request.Headers)
+		case *network.EventRequestWillBeSentExtraInfo:
+			capture.mu.Lock()
+			_, isGarminRequest := capture.garminRequests[event.RequestID]
+			capture.mu.Unlock()
+			if isGarminRequest {
+				captureGarminSessionHeaders(capture, event.Headers)
+			}
 		}
-		auth := networkHeader(req.Request.Headers, "Authorization")
-		cookie := networkHeader(req.Request.Headers, "Cookie")
-		ua := networkHeader(req.Request.Headers, "User-Agent")
-		capture.mu.Lock()
-		capture.seenAPI = true
-		if auth != "" {
-			capture.authorization = auth
-		}
-		if cookie != "" {
-			capture.cookie = cookie
-		}
-		if ua != "" {
-			capture.userAgent = ua
-		}
-		capture.mu.Unlock()
 	})
+}
+
+func captureGarminSessionHeaders(capture *webSessionCapture, headers network.Headers) {
+	auth := networkHeader(headers, "Authorization")
+	cookie := networkHeader(headers, "Cookie")
+	ua := networkHeader(headers, "User-Agent")
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if auth != "" {
+		capture.authorization = auth
+	}
+	if cookie != "" {
+		capture.cookie = cookie
+	}
+	if ua != "" {
+		capture.userAgent = ua
+	}
 }
 
 func markGarminSessionSeen(capture *webSessionCapture) {

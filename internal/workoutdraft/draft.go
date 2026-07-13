@@ -191,12 +191,16 @@ func (s Store) write(drafts []Draft) error {
 }
 
 func parsePrompt(prompt string) ([]Step, []string, error) {
-	parts := regexp.MustCompile(`[,;+]|\bthen\b`).Split(prompt, -1)
+	parts := splitPromptParts(prompt)
 	var steps []Step
 	var notes []string
 	for _, raw := range parts {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
+			continue
+		}
+		if step, ok := parseSetRepeat(raw); ok {
+			steps = append(steps, step)
 			continue
 		}
 		if step, ok := parseTimeRepeat(raw); ok {
@@ -222,8 +226,63 @@ func parsePrompt(prompt string) ([]Step, []string, error) {
 	return steps, notes, nil
 }
 
+func splitPromptParts(prompt string) []string {
+	var parts []string
+	start := 0
+	depth := 0
+	for i, r := range prompt {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',', ';', '+':
+			if depth == 0 {
+				parts = append(parts, prompt[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, prompt[start:])
+
+	var out []string
+	then := regexp.MustCompile(`(?i)\bthen\b`)
+	for _, part := range parts {
+		out = append(out, then.Split(part, -1)...)
+	}
+	return out
+}
+
+func parseSetRepeat(s string) (Step, bool) {
+	re := regexp.MustCompile(`(?i)^(\d+)\s+sets?\s+of\s*\((.+)\)(?:\s+with\s+(.+))?$`)
+	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return Step{}, false
+	}
+	repeat, _ := strconv.Atoi(m[1])
+	children, notes, err := parsePrompt(m[2])
+	if err != nil || len(notes) != 0 || len(children) == 0 {
+		return Step{}, false
+	}
+	recoveryText := strings.TrimSpace(m[3])
+	recoveryText = regexp.MustCompile(`(?i)\s+between\s+sets?$`).ReplaceAllString(recoveryText, "")
+	if recovery, ok := parseRecovery(recoveryText); ok {
+		children = append(children, recovery)
+	}
+	return Step{
+		Name:             fmt.Sprintf("%d sets", repeat),
+		StepType:         "repeat",
+		Repeat:           repeat,
+		SkipLastRecovery: len(children) > 0 && children[len(children)-1].StepType == "recovery",
+		Steps:            children,
+		Notes:            strings.TrimSpace(s),
+	}, true
+}
+
 func parseRepeat(s string) (Step, bool) {
-	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)(?:\s+at\s+(.+?))?(?:\s+with\s+(.+))?$`)
+	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)(?:\s+(?:at\s+)?(.+?))?(?:\s+with\s+(.+))?$`)
 	m := re.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
 		return Step{}, false
@@ -232,6 +291,10 @@ func parseRepeat(s string) (Step, bool) {
 	dist, _ := strconv.ParseFloat(m[2], 64)
 	unit := normalizeDistanceUnit(m[3])
 	target := strings.TrimSpace(m[4])
+	recoveryText := strings.TrimSpace(m[5])
+	if recoveryText == "" {
+		target, recoveryText = splitUntimedFullRecovery(target)
+	}
 	interval := Step{
 		Name:        fmt.Sprintf("%s%s", trimFloat(dist), unit),
 		StepType:    "interval",
@@ -241,16 +304,31 @@ func parseRepeat(s string) (Step, bool) {
 		Notes:       strings.TrimSpace(s),
 	}
 	children := []Step{interval}
-	if recovery, ok := parseRecovery(strings.TrimSpace(m[5])); ok {
+	skipLastRecovery := false
+	if recovery, ok := parseRecovery(recoveryText); ok {
 		children = append(children, recovery)
+	} else if recovery, ok := parseManualRecovery(recoveryText); ok {
+		children = append(children, recovery)
+		skipLastRecovery = true
 	}
 	return Step{
-		Name:     fmt.Sprintf("%dx%s%s", repeat, trimFloat(dist), unit),
-		StepType: "repeat",
-		Repeat:   repeat,
-		Steps:    children,
-		Notes:    strings.TrimSpace(s),
+		Name:             fmt.Sprintf("%dx%s%s", repeat, trimFloat(dist), unit),
+		StepType:         "repeat",
+		Repeat:           repeat,
+		SkipLastRecovery: skipLastRecovery,
+		Steps:            children,
+		Notes:            strings.TrimSpace(s),
 	}, true
+}
+
+func splitUntimedFullRecovery(target string) (string, string) {
+	lower := strings.ToLower(target)
+	for _, phrase := range []string{"full recovery", "full recover", "全恢复"} {
+		if index := strings.LastIndex(lower, phrase); index >= 0 && strings.TrimSpace(target[index+len(phrase):]) == "" {
+			return strings.TrimSpace(target[:index]), target[index:]
+		}
+	}
+	return target, ""
 }
 
 func parseTimeRepeat(s string) (Step, bool) {
@@ -307,6 +385,9 @@ func parseTimeRepeat(s string) (Step, bool) {
 }
 
 func parseManualRecovery(s string) (Step, bool) {
+	if regexp.MustCompile(`(?i)\d+(?:\.\d+)?\s*(?:min|mins|minute|minutes|sec|secs|second|seconds)\s+(?:full\s+recover|全恢复)`).MatchString(s) {
+		return Step{}, false
+	}
 	text := manualRecoveryText(s)
 	if text == "" {
 		return Step{}, false
@@ -319,6 +400,9 @@ func parseManualRecovery(s string) (Step, bool) {
 
 func manualRecoveryText(s string) string {
 	lower := strings.ToLower(s)
+	if strings.Contains(lower, "full recover") || strings.Contains(lower, "全恢复") {
+		return "Full recovery: press Lap when ready"
+	}
 	first := -1
 	for _, phrase := range []string{"walk down", "jog down", "walk back", "jog back"} {
 		if index := strings.Index(lower, phrase); index >= 0 && (first < 0 || index < first) {
@@ -332,28 +416,40 @@ func manualRecoveryText(s string) string {
 }
 
 func applyManualRecovery(steps *[]Step, text string) bool {
-	recovery, ok := parseManualRecovery(text)
-	if !ok || len(*steps) == 0 {
+	if len(*steps) == 0 {
 		return false
 	}
 	last := &(*steps)[len(*steps)-1]
-	if last.StepType != "repeat" || !strings.Contains(strings.ToLower(last.Notes), "hill") {
+	if last.StepType != "repeat" {
+		return false
+	}
+
+	recovery, ok := Step{}, false
+	if isRecoveryText(text) {
+		recovery, ok = parseRecovery(text)
+	}
+	skipLastRecovery := false
+	if !ok {
+		recovery, ok = parseManualRecovery(text)
+		skipLastRecovery = ok
+	}
+	if !ok {
 		return false
 	}
 	for i := range last.Steps {
 		if last.Steps[i].StepType == "recovery" {
 			last.Steps[i] = recovery
-			last.SkipLastRecovery = true
+			last.SkipLastRecovery = skipLastRecovery
 			return true
 		}
 	}
-	return false
+	last.Steps = append(last.Steps, recovery)
+	last.SkipLastRecovery = skipLastRecovery
+	return true
 }
 
 func defaultRecoveryForRepeat(lower string) Step {
 	switch {
-	case strings.Contains(lower, "full recover") || strings.Contains(lower, "full recovery") || strings.Contains(lower, "全恢复"):
-		return Step{Name: "Recovery", StepType: "recovery", DurationSec: 90, Notes: "Full recovery, defaulted to 90 seconds"}
 	case strings.Contains(lower, "hill"):
 		return Step{Name: "Recovery", StepType: "recovery", DurationSec: 90, Notes: "Hill sprint recovery, defaulted to 90 seconds"}
 	case strings.Contains(lower, "stride"):
@@ -361,6 +457,11 @@ func defaultRecoveryForRepeat(lower string) Step {
 	default:
 		return Step{}
 	}
+}
+
+func isRecoveryText(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest")
 }
 
 func parseRecovery(s string) (Step, bool) {
@@ -392,7 +493,7 @@ func parseSingle(s string) (Step, bool) {
 			stepType, name = "warmup", "Warm Up"
 		case strings.Contains(lower, "cool"):
 			stepType, name = "cooldown", "Cool Down"
-		case strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest"):
+		case strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest") || strings.Contains(lower, "float"):
 			stepType, name = "recovery", "Recovery"
 		case isEasyText(lower):
 			name = "Easy"

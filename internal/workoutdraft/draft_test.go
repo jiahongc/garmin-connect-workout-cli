@@ -28,6 +28,29 @@ func TestPlanParsesRepeatWorkout(t *testing.T) {
 	}
 }
 
+func TestPlanParsesNestedSetWorkout(t *testing.T) {
+	draft, err := Plan("2mi easy warmup, 2 sets of (4 min at 10K effort, 60 sec float, 3 min at 5K effort, 60 sec float, 2 min at 3K effort) with 3 min jog between sets, 15 min cooldown", "2026-07-21", "Tue 7/21: 4/3/2 fartlek")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if len(draft.Workout.Steps) != 3 {
+		t.Fatalf("top-level steps = %d, want warmup + set repeat + cooldown", len(draft.Workout.Steps))
+	}
+	set := draft.Workout.Steps[1]
+	if set.StepType != "repeat" || set.Repeat != 2 || !set.SkipLastRecovery {
+		t.Fatalf("set step = %#v, want two repeats that skip the final set recovery", set)
+	}
+	if len(set.Steps) != 6 {
+		t.Fatalf("set children = %d, want 4min/float/3min/float/2min/set jog", len(set.Steps))
+	}
+	if set.Steps[1].StepType != "recovery" || set.Steps[1].DurationSec != 60 {
+		t.Fatalf("first float = %#v, want 60-second recovery", set.Steps[1])
+	}
+	if set.Steps[5].StepType != "recovery" || set.Steps[5].DurationSec != 180 {
+		t.Fatalf("set jog = %#v, want 3-minute recovery", set.Steps[5])
+	}
+}
+
 func TestPlanParsesScreenshotStyleWorkoutWithNotesAndDefaultStrideRecovery(t *testing.T) {
 	draft, err := Plan("35min E + Drills + 4x20s strides 全程放松，不追配速", "2026-06-23", "")
 	if err != nil {
@@ -48,20 +71,49 @@ func TestPlanParsesScreenshotStyleWorkoutWithNotesAndDefaultStrideRecovery(t *te
 	}
 }
 
-func TestPlanParsesHillSprintsWithFullRecovery(t *testing.T) {
-	draft, err := Plan("30min E + 6x10\" Hill Sprint 每次全恢复", "2026-06-25", "")
+func TestPlanUsesLapButtonForUntimedFullRecovery(t *testing.T) {
+	for _, prompt := range []string{
+		"4x200m relaxed fast with full recovery",
+		"4x200m relaxed fast full recovery",
+		"6x10s hill sprint full recovery",
+	} {
+		draft, err := Plan(prompt, "2026-07-14", "")
+		if err != nil {
+			t.Fatalf("Plan(%q) returned error: %v", prompt, err)
+		}
+		repeat := draft.Workout.Steps[0]
+		if repeat.StepType != "repeat" || len(repeat.Steps) != 2 {
+			t.Fatalf("Plan(%q) should create an interval/recovery repeat, got %#v", prompt, repeat)
+		}
+		if repeat.Steps[0].StepType != "interval" {
+			t.Fatalf("Plan(%q) should preserve the work rep as an interval, got %#v", prompt, repeat.Steps[0])
+		}
+		if repeat.Steps[1].EndCondition != "lap.button" || !repeat.SkipLastRecovery {
+			t.Fatalf("Plan(%q) should use manual recovery and skip the final rest, got %#v", prompt, repeat)
+		}
+		segments := draft.GarminPayload["workoutSegments"].([]any)
+		group := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
+		if group["skipLastRestStep"] != true {
+			t.Fatalf("Plan(%q) should skip the final Garmin recovery, got %#v", prompt, group)
+		}
+		recovery := group["workoutSteps"].([]any)[1].(map[string]any)
+		if recovery["endCondition"].(map[string]any)["conditionTypeKey"] != "lap.button" {
+			t.Fatalf("Plan(%q) should use Garmin lap-button recovery, got %#v", prompt, recovery)
+		}
+		if _, ok := recovery["endConditionValue"]; ok {
+			t.Fatalf("Plan(%q) should not set a recovery duration, got %#v", prompt, recovery)
+		}
+	}
+}
+
+func TestPlanKeepsExplicitFullRecoveryDuration(t *testing.T) {
+	draft, err := Plan("6x10s hill sprint, 2 min full recovery", "2026-07-14", "")
 	if err != nil {
 		t.Fatalf("Plan returned error: %v", err)
 	}
-	if draft.Workout.Name != "June 25: 30E + 6x10s hill sprints" {
-		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
-	}
-	repeat := draft.Workout.Steps[1]
-	if repeat.StepType != "repeat" || repeat.Repeat != 6 {
-		t.Fatalf("expected 6 hill sprint repeats, got %#v", repeat)
-	}
-	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 90 {
-		t.Fatalf("expected default 90 second full recovery, got %#v", repeat.Steps)
+	repeat := draft.Workout.Steps[0]
+	if repeat.SkipLastRecovery || repeat.Steps[1].DurationSec != 120 || repeat.Steps[1].EndCondition != "" {
+		t.Fatalf("explicit two-minute recovery should stay timed, got %#v", repeat)
 	}
 }
 

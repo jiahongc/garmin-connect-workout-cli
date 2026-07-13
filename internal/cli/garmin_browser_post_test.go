@@ -5,6 +5,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/chromedp/cdproto/network"
 )
 
 func TestGarminBrowserHTTPErrorRateLimit(t *testing.T) {
@@ -20,6 +22,33 @@ func TestGarminBrowserHTTPErrorRateLimit(t *testing.T) {
 	for _, want := range []string{"HTTP 429", "rate limiting", "retry_after", "30 seconds"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("rate-limit error = %q, want substring %q", msg, want)
+		}
+	}
+}
+
+func TestCaptureGarminSessionHeaders(t *testing.T) {
+	capture := &webSessionCapture{}
+	captureGarminSessionHeaders(capture, network.Headers{
+		"Authorization": "Bearer token",
+		"Cookie":        "SESSIONID=cookie",
+		"User-Agent":    "test-agent",
+	})
+	if capture.authorization != "Bearer token" || capture.cookie != "SESSIONID=cookie" || capture.userAgent != "test-agent" {
+		t.Fatalf("captured headers = %#v", capture)
+	}
+}
+
+func TestGarminLoginProbeOnlyRunsFromConnectApp(t *testing.T) {
+	for _, tt := range []struct {
+		location string
+		want     bool
+	}{
+		{"", false},
+		{"https://sso.garmin.com/portal/sso/en-US/sign-in", false},
+		{"https://connect.garmin.com/app/workouts", true},
+	} {
+		if got := shouldProbeGarminLogin(tt.location); got != tt.want {
+			t.Fatalf("shouldProbeGarminLogin(%q) = %v, want %v", tt.location, got, tt.want)
 		}
 	}
 }

@@ -32,7 +32,7 @@ func newWorkoutsGetCmd(flags *rootFlags) *cobra.Command {
 			}
 			path = replacePathParam(path, "workout_id", args[0])
 			params := map[string]string{}
-			data, prov, err := resolveReadWithStrategy(cmd.Context(), c, flags, "auto", "workouts", false, path, params, nil, cmd.ErrOrStderr())
+			data, prov, err := resolveGarminWorkoutRead(cmd.Context(), c, flags, false, path, params, cmd.ErrOrStderr())
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}

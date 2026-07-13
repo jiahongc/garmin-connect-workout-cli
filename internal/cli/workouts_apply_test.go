@@ -18,7 +18,7 @@ func TestHasGarminWriteAuth(t *testing.T) {
 		{name: "nil config", cfg: nil, want: false},
 		{name: "empty config", cfg: &config.Config{}, want: false},
 		{name: "oauth header", cfg: &config.Config{AuthHeaderVal: "Bearer token"}, want: true},
-		{name: "cookie header", cfg: &config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}}, want: true},
+		{name: "cookie-only session uses browser write", cfg: &config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}}, want: false},
 		{name: "blank cookie header", cfg: &config.Config{Headers: map[string]string{"Cookie": "  "}}, want: false},
 	}
 	for _, tt := range tests {

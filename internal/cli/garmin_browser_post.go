@@ -25,8 +25,16 @@ type browserPostResponse struct {
 	Body    string `json:"body"`
 }
 
+func garminBrowserGetJSON(ctx context.Context, path string) ([]byte, int, error) {
+	return garminBrowserRequestJSON(ctx, "GET", path, nil)
+}
+
 func garminBrowserPostJSON(ctx context.Context, path string, body any) ([]byte, int, error) {
 	return garminBrowserRequestJSON(ctx, "POST", path, body)
+}
+
+func garminBrowserPutJSON(ctx context.Context, path string, body any) ([]byte, int, error) {
+	return garminBrowserRequestJSON(ctx, "PUT", path, body)
 }
 
 func garminBrowserDelete(ctx context.Context, path string) ([]byte, int, error) {
