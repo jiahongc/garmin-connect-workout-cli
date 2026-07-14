@@ -52,3 +52,40 @@ func TestGarminLoginProbeOnlyRunsFromConnectApp(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldStopGarminBrowserFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		resp browserPostResponse
+		want bool
+	}{
+		{
+			name: "successful JSON response",
+			resp: browserPostResponse{Status: 200, Body: `[]`},
+			want: true,
+		},
+		{
+			name: "Garmin 427 tries the next base",
+			resp: browserPostResponse{Status: 427, Body: `{"error":{"status-code":"427"}}`},
+			want: false,
+		},
+		{
+			name: "rate limit stops fallback fanout",
+			resp: browserPostResponse{Status: 429, Body: `{"retry_after":30}`},
+			want: true,
+		},
+		{
+			name: "HTML response tries the next base",
+			resp: browserPostResponse{Status: 200, Body: `<!doctype html><html></html>`},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldStopGarminBrowserFallback(tt.resp); got != tt.want {
+				t.Fatalf("shouldStopGarminBrowserFallback(%+v) = %v, want %v", tt.resp, got, tt.want)
+			}
+		})
+	}
+}

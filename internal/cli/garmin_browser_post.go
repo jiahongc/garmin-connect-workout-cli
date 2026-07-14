@@ -19,6 +19,13 @@ import (
 
 var garminBrowserMu sync.Mutex
 
+var garminBrowserBases = []string{
+	"/gc-api",
+	"https://connectapi.garmin.com",
+	"https://connect.garmin.com/proxy",
+	"https://connect.garmin.com/modern/proxy",
+}
+
 type browserPostResponse struct {
 	BaseURL string `json:"base_url"`
 	Status  int    `json:"status"`
@@ -56,18 +63,6 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 	if _, err := os.Stat(filepath.Join(profileDir, "Default", "Cookies")); err != nil {
 		return nil, 0, fmt.Errorf("Garmin browser profile is not ready; run auth login-browser first")
 	}
-	pathLiteral, err := json.Marshal(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	methodLiteral, err := json.Marshal(method)
-	if err != nil {
-		return nil, 0, err
-	}
-	bodyLiteral, err := json.Marshal(body)
-	if err != nil {
-		return nil, 0, err
-	}
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -84,25 +79,80 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 	defer timeoutCancel()
 
 	var parsed browserPostResponse
+	err = chromedp.Run(browserCtx,
+		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			response, err := garminBrowserRequestFromPage(ctx, method, path, body)
+			parsed = response
+			return err
+		}),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("posting through Garmin browser session: %w", err)
+	}
+	if parsed.Status < 200 || parsed.Status >= 300 {
+		return []byte(parsed.Body), parsed.Status, garminBrowserHTTPError(method, path, parsed)
+	}
+	if bodyLooksLikeHTML(parsed.Body) {
+		return []byte(parsed.Body), parsed.Status, authErr(fmt.Errorf("Garmin browser %s %s returned Garmin app HTML, not API JSON; run auth login-browser again", method, path))
+	}
+	return []byte(parsed.Body), parsed.Status, nil
+}
+
+func garminBrowserRequestFromPage(ctx context.Context, method string, path string, body any) (browserPostResponse, error) {
+	var firstFailure *browserPostResponse
+	var last browserPostResponse
+	for _, base := range garminBrowserBases {
+		response, err := evaluateGarminBrowserRequest(ctx, base, method, path, body)
+		if err != nil {
+			return browserPostResponse{}, err
+		}
+		last = response
+		if shouldStopGarminBrowserFallback(response) {
+			return response, nil
+		}
+		if firstFailure == nil && response.Status != 0 && !bodyLooksLikeHTML(response.Body) {
+			copy := response
+			firstFailure = &copy
+		}
+	}
+	if firstFailure != nil {
+		return *firstFailure, nil
+	}
+	return last, nil
+}
+
+func evaluateGarminBrowserRequest(ctx context.Context, base string, method string, path string, body any) (browserPostResponse, error) {
+	baseLiteral, err := json.Marshal(base)
+	if err != nil {
+		return browserPostResponse{}, err
+	}
+	methodLiteral, err := json.Marshal(method)
+	if err != nil {
+		return browserPostResponse{}, err
+	}
+	pathLiteral, err := json.Marshal(path)
+	if err != nil {
+		return browserPostResponse{}, err
+	}
+	bodyLiteral, err := json.Marshal(body)
+	if err != nil {
+		return browserPostResponse{}, err
+	}
+
 	script := fmt.Sprintf(`(async () => {
+		const base = %s;
 		const method = %s;
 		const path = %s;
 		const body = %s;
-		const csrf = document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || "";
-		let token = null;
 		try {
-			token = JSON.parse(localStorage.getItem("token") || "null");
-		} catch (_) {
-			token = null;
-		}
-		const bases = [
-			"/gc-api",
-			"https://connectapi.garmin.com",
-			"https://connect.garmin.com/proxy",
-			"https://connect.garmin.com/modern/proxy"
-		];
-		let last = {base_url: "", status: 0, body: ""};
-		for (const base of bases) {
+			const csrf = document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || "";
+			let token = null;
+			try {
+				token = JSON.parse(localStorage.getItem("token") || "null");
+			} catch (_) {
+				token = null;
+			}
 			const options = {
 				method,
 				credentials: "include",
@@ -118,44 +168,35 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 			if (body !== null) {
 				options.body = JSON.stringify(body);
 			}
-			const response = await fetch(base + path, {
-				...options
-			});
-			const responseBody = await response.text();
-			last = {base_url: base, status: response.status, body: responseBody};
-			if (!responseBody.trimStart().toLowerCase().startsWith("<!doctype html") &&
-				!responseBody.trimStart().toLowerCase().startsWith("<html")) {
-				return last;
-			}
+			const response = await fetch(base + path, options);
+			return {base_url: base, status: response.status, body: await response.text()};
+		} catch (error) {
+			return {base_url: base, status: 0, body: String(error && error.message ? error.message : error)};
 		}
-		return last;
-	})()`, string(methodLiteral), string(pathLiteral), string(bodyLiteral))
-	err = chromedp.Run(browserCtx,
-		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			value, exception, err := runtime.Evaluate(script).
-				WithAwaitPromise(true).
-				WithReturnByValue(true).
-				Do(ctx)
-			if err != nil {
-				return err
-			}
-			if exception != nil {
-				return exception
-			}
-			return json.Unmarshal(value.Value, &parsed)
-		}),
-	)
+	})()`, string(baseLiteral), string(methodLiteral), string(pathLiteral), string(bodyLiteral))
+
+	var parsed browserPostResponse
+	value, exception, err := runtime.Evaluate(script).
+		WithAwaitPromise(true).
+		WithReturnByValue(true).
+		Do(ctx)
 	if err != nil {
-		return nil, 0, fmt.Errorf("posting through Garmin browser session: %w", err)
+		return browserPostResponse{}, err
 	}
-	if parsed.Status < 200 || parsed.Status >= 300 {
-		return []byte(parsed.Body), parsed.Status, garminBrowserHTTPError(method, path, parsed)
+	if exception != nil {
+		return browserPostResponse{}, exception
 	}
-	if bodyLooksLikeHTML(parsed.Body) {
-		return []byte(parsed.Body), parsed.Status, authErr(fmt.Errorf("Garmin browser %s %s returned Garmin app HTML, not API JSON; run auth login-browser again", method, path))
+	if err := json.Unmarshal(value.Value, &parsed); err != nil {
+		return browserPostResponse{}, err
 	}
-	return []byte(parsed.Body), parsed.Status, nil
+	return parsed, nil
+}
+
+func shouldStopGarminBrowserFallback(response browserPostResponse) bool {
+	if response.Status == 429 {
+		return true
+	}
+	return response.Status >= 200 && response.Status < 300 && !bodyLooksLikeHTML(response.Body)
 }
 
 func garminBrowserHTTPError(method string, path string, parsed browserPostResponse) error {

@@ -22,7 +22,6 @@ import (
 	"garmin-connect-workout-cli/internal/config"
 	"garmin-connect-workout-cli/internal/garminsession"
 	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 	garmin "github.com/llehouerou/go-garmin"
@@ -211,6 +210,10 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 }
 
 func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
+	return verifyGarminBrowserProfileWithAction(parent, profileDir, timeout, nil)
+}
+
+func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir string, timeout time.Duration, action func(context.Context) error) (garminsession.Session, error) {
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
@@ -280,6 +283,11 @@ func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeo
 					return garminsession.Session{}, err
 				}
 				if ok && session.Active(time.Now()) {
+					if action != nil {
+						if err := chromedp.Run(ctx, chromedp.ActionFunc(action)); err != nil {
+							return garminsession.Session{}, err
+						}
+					}
 					return session, nil
 				}
 			}
@@ -294,35 +302,10 @@ func shouldProbeGarminLogin(location string) bool {
 
 func browserWorkoutListProbe(ctx context.Context) (int, string, error) {
 	var parsed browserPostResponse
-	script := `(async () => {
-		try {
-			const csrf = document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || "";
-			const response = await fetch("/gc-api/workout-service/workouts?start=0&limit=1", {
-				credentials: "include",
-				headers: {
-					"Accept": "application/json",
-					"Connect-Csrf-Token": csrf,
-					"NK": "NT",
-					"Referer": "https://connect.garmin.com/app/workouts"
-				}
-			});
-			return {base_url: "/gc-api", status: response.status, body: await response.text()};
-		} catch (error) {
-			return {base_url: "/gc-api", status: 0, body: String(error && error.message ? error.message : error)};
-		}
-	})()`
 	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		value, exception, err := runtime.Evaluate(script).
-			WithAwaitPromise(true).
-			WithReturnByValue(true).
-			Do(ctx)
-		if err != nil {
-			return err
-		}
-		if exception != nil {
-			return exception
-		}
-		return json.Unmarshal(value.Value, &parsed)
+		response, err := garminBrowserRequestFromPage(ctx, "GET", "/workout-service/workouts?start=0&limit=1", nil)
+		parsed = response
+		return err
 	}))
 	return parsed.Status, parsed.Body, err
 }
