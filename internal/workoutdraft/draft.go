@@ -591,7 +591,8 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 		} else if step.Distance > 0 {
 			meters := distanceMeters(step.Distance, step.DistanceUOM)
 			item["endCondition"] = map[string]any{"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 3, "displayable": true}
-			item["endConditionValue"] = meters
+			item["endConditionValue"] = step.Distance
+			item["preferredEndConditionUnit"] = preferredDistanceUnit(step.DistanceUOM)
 			total += estimateDuration(step, meters)
 		} else {
 			item["endCondition"] = map[string]any{"conditionTypeId": 2, "conditionTypeKey": "time", "displayOrder": 2, "displayable": true}
@@ -675,6 +676,20 @@ func distanceMeters(value float64, unit string) float64 {
 		return value * 1609.344
 	default:
 		return value
+	}
+}
+
+// preferredDistanceUnit selects the unit shown by Garmin's distance picker.
+// endConditionValue is expressed in this unit; metres are only used internally
+// for workout-level estimates and duration calculations.
+func preferredDistanceUnit(unit string) map[string]any {
+	switch normalizeDistanceUnit(unit) {
+	case "km":
+		return map[string]any{"unitKey": "kilometer", "factor": 1000.0}
+	case "mi":
+		return map[string]any{"unitKey": "mile", "factor": 1609.344}
+	default:
+		return map[string]any{"unitKey": "meter", "factor": 1.0}
 	}
 }
 

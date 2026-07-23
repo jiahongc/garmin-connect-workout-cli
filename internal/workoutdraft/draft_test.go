@@ -193,6 +193,31 @@ func TestPlanAddsPaceZoneForExplicitPace(t *testing.T) {
 	}
 }
 
+func TestPlanPreservesDistancePickerUnit(t *testing.T) {
+	for _, tc := range []struct {
+		prompt  string
+		value   float64
+		unitKey string
+	}{
+		{prompt: "8.45 mi easy", value: 8.45, unitKey: "mile"},
+		{prompt: "2.41 km easy", value: 2.41, unitKey: "kilometer"},
+	} {
+		draft, err := Plan(tc.prompt, "2026-07-23", "")
+		if err != nil {
+			t.Fatalf("Plan(%q) returned error: %v", tc.prompt, err)
+		}
+		segments := draft.GarminPayload["workoutSegments"].([]any)
+		step := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
+		if step["endConditionValue"] != tc.value {
+			t.Fatalf("Plan(%q) end condition value = %#v, want %v", tc.prompt, step["endConditionValue"], tc.value)
+		}
+		unit := step["preferredEndConditionUnit"].(map[string]any)
+		if unit["unitKey"] != tc.unitKey {
+			t.Fatalf("Plan(%q) picker unit = %#v, want %q", tc.prompt, unit, tc.unitKey)
+		}
+	}
+}
+
 func TestPlanRejectsInvalidDate(t *testing.T) {
 	if _, err := Plan("10 min warmup", "07/01/2026", ""); err == nil {
 		t.Fatal("expected invalid date error")
