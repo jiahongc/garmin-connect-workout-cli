@@ -73,6 +73,23 @@ garmin-connect-workout-cli workouts plan "35min easy + drills + 4x20s strides re
   --json
 ```
 
+The planner understands common running shorthand, including unitless track
+repeats such as `6x800`, minute repeats such as `4x3min`, standard stride
+recovery, and hill-sprint walk-down recovery. It asks follow-up questions only
+when a missing detail would materially change the Garmin workout—for example an
+interval recovery, work-rep effort, warmup or cooldown length, an ambiguous
+repeat unit, or how to complete a stated total distance.
+
+In an interactive terminal, answer by entering the complete workout again with
+the requested details included. With `--no-input` or `--agent`, the command
+prints the exact clarification questions and exits without saving a draft
+instead of guessing.
+
+For example, `6x800m at 5K pace` is missing a recovery. The CLI asks what should
+follow each repeat, such as `2 min jog`, `400 m jog`, or full recovery. A
+complete description such as `6x800m at 5K pace with 2 min jog` proceeds
+without a question.
+
 Use the returned `draft_id`, review the payload, then apply it:
 
 ```bash

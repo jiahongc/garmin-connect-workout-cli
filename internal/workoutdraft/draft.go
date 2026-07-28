@@ -288,16 +288,19 @@ func parseSetRepeat(s string) (Step, bool) {
 }
 
 func parseRepeat(s string) (Step, bool) {
-	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)(?:\s+(?:at\s+)?(.+?))?(?:\s+with\s+(.+))?$`)
-	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	workText, recoveryText := splitRecoveryClause(strings.TrimSpace(s))
+	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)?(?:\s+(?:at\s+)?(.+?))?$`)
+	m := re.FindStringSubmatch(workText)
 	if m == nil {
 		return Step{}, false
 	}
 	repeat, _ := strconv.Atoi(m[1])
 	dist, _ := strconv.ParseFloat(m[2], 64)
+	if m[3] == "" && dist < 100 {
+		return Step{}, false
+	}
 	unit := normalizeDistanceUnit(m[3])
 	target := strings.TrimSpace(m[4])
-	recoveryText := strings.TrimSpace(m[5])
 	if recoveryText == "" {
 		target, recoveryText = splitUntimedFullRecovery(target)
 	}
@@ -316,6 +319,8 @@ func parseRepeat(s string) (Step, bool) {
 	} else if recovery, ok := parseManualRecovery(recoveryText); ok {
 		children = append(children, recovery)
 		skipLastRecovery = true
+	} else if recovery := defaultRecoveryForRepeat(strings.ToLower(s)); recovery.DurationSec > 0 {
+		children = append(children, recovery)
 	}
 	return Step{
 		Name:             fmt.Sprintf("%dx%s%s", repeat, trimFloat(dist), unit),
@@ -338,15 +343,23 @@ func splitUntimedFullRecovery(target string) (string, string) {
 }
 
 func parseTimeRepeat(s string) (Step, bool) {
-	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds|")\s*(.*?)(?:\s+with\s+(.+))?$`)
-	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	workText, recoveryText := splitRecoveryClause(strings.TrimSpace(s))
+	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|"|min|mins|minute|minutes)\s*(.*?)$`)
+	m := re.FindStringSubmatch(workText)
 	if m == nil {
 		return Step{}, false
 	}
 	repeat, _ := strconv.Atoi(m[1])
-	seconds, _ := strconv.ParseFloat(m[2], 64)
-	label := strings.TrimSpace(m[3])
-	recoveryText := strings.TrimSpace(m[4])
+	value, _ := strconv.ParseFloat(m[2], 64)
+	unit := strings.ToLower(m[3])
+	seconds := value
+	durationLabel := trimFloat(value) + "s"
+	if strings.HasPrefix(unit, "min") {
+		seconds *= 60
+		durationLabel = trimFloat(value) + "min"
+	}
+	label := strings.TrimSpace(m[4])
+	label = regexp.MustCompile(`(?i)^at\s+`).ReplaceAllString(label, "")
 	if label == "" {
 		label = "Interval"
 	}
@@ -381,13 +394,22 @@ func parseTimeRepeat(s string) (Step, bool) {
 		children = append(children, recovery)
 	}
 	return Step{
-		Name:             fmt.Sprintf("%dx%ss %s", repeat, trimFloat(seconds), strings.ToLower(name)),
+		Name:             fmt.Sprintf("%dx%s %s", repeat, durationLabel, strings.ToLower(name)),
 		StepType:         "repeat",
 		Repeat:           repeat,
 		SkipLastRecovery: skipLastRecovery,
 		Steps:            children,
 		Notes:            strings.TrimSpace(s),
 	}, true
+}
+
+func splitRecoveryClause(text string) (string, string) {
+	lower := strings.ToLower(text)
+	index := strings.LastIndex(lower, " with ")
+	if index < 0 {
+		return text, ""
+	}
+	return strings.TrimSpace(text[:index]), strings.TrimSpace(text[index+len(" with "):])
 }
 
 func parseManualRecovery(s string) (Step, bool) {

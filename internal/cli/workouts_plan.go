@@ -3,7 +3,11 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"garmin-connect-workout-cli/internal/workoutdraft"
 
@@ -30,7 +34,16 @@ func newNovelWorkoutsPlanCmd(flags *rootFlags) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "would parse workout and save a local draft")
 				return nil
 			}
-			draft, err := workoutdraft.Plan(args[0], flagDate, flagName)
+			prompt, err := resolveWorkoutClarifications(
+				cmd.InOrStdin(),
+				cmd.ErrOrStderr(),
+				args[0],
+				!flags.noInput && !flags.agent && isTerminalInput(cmd.InOrStdin()),
+			)
+			if err != nil {
+				return usageErr(err)
+			}
+			draft, err := workoutdraft.Plan(prompt, flagDate, flagName)
 			if err != nil {
 				return usageErr(err)
 			}
@@ -64,4 +77,56 @@ func newNovelWorkoutsPlanCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flagDate, "date", "", "Optional schedule date in YYYY-MM-DD format")
 	cmd.Flags().StringVar(&flagName, "name", "", "Workout name to save in Garmin Connect")
 	return cmd
+}
+
+func resolveWorkoutClarifications(in io.Reader, errOut io.Writer, prompt string, allowInput bool) (string, error) {
+	reader := bufio.NewReader(in)
+	current := strings.TrimSpace(prompt)
+	for round := 0; round < 3; round++ {
+		questions := workoutdraft.Clarifications(current)
+		if len(questions) == 0 {
+			return current, nil
+		}
+		if !allowInput {
+			return "", workoutClarificationError(questions)
+		}
+
+		fmt.Fprintln(errOut, "Before I create this workout, I need to clarify:")
+		for index, question := range questions {
+			fmt.Fprintf(errOut, "  %d. %s\n", index+1, question.Question)
+		}
+		fmt.Fprint(errOut, "Enter the complete workout again with those details included: ")
+		revised, err := reader.ReadString('\n')
+		if err != nil && revised == "" {
+			return "", fmt.Errorf("reading clarified workout: %w", err)
+		}
+		current = strings.TrimSpace(revised)
+		if current == "" {
+			return "", fmt.Errorf("clarified workout cannot be empty")
+		}
+	}
+	return "", workoutClarificationError(workoutdraft.Clarifications(current))
+}
+
+func workoutClarificationError(questions []workoutdraft.Clarification) error {
+	var message strings.Builder
+	message.WriteString("workout needs clarification before a draft can be created:")
+	for _, question := range questions {
+		message.WriteString("\n- ")
+		message.WriteString(question.Question)
+	}
+	message.WriteString("\nrerun workouts plan with a complete workout description")
+	return fmt.Errorf("%s", message.String())
+}
+
+func isTerminalInput(in io.Reader) bool {
+	file, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return true
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
