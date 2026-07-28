@@ -19,7 +19,7 @@ func TestGarminBrowserHTTPErrorRateLimit(t *testing.T) {
 		t.Fatalf("ExitCode(rate limit) = %d, want 7", got)
 	}
 	msg := err.Error()
-	for _, want := range []string{"HTTP 429", "rate limiting", "retry_after", "30 seconds"} {
+	for _, want := range []string{"HTTP 429", "rate limiting", "retry_after=30 seconds", "mutation circuit", "refuse writes"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("rate-limit error = %q, want substring %q", msg, want)
 		}
@@ -38,7 +38,7 @@ func TestCaptureGarminSessionHeaders(t *testing.T) {
 	}
 }
 
-func TestGarminLoginProbeOnlyRunsFromConnectApp(t *testing.T) {
+func TestGarminLoginSessionCheckOnlyRunsFromConnectApp(t *testing.T) {
 	for _, tt := range []struct {
 		location string
 		want     bool
@@ -47,8 +47,8 @@ func TestGarminLoginProbeOnlyRunsFromConnectApp(t *testing.T) {
 		{"https://sso.garmin.com/portal/sso/en-US/sign-in", false},
 		{"https://connect.garmin.com/app/workouts", true},
 	} {
-		if got := shouldProbeGarminLogin(tt.location); got != tt.want {
-			t.Fatalf("shouldProbeGarminLogin(%q) = %v, want %v", tt.location, got, tt.want)
+		if got := isGarminConnectAppLocation(tt.location); got != tt.want {
+			t.Fatalf("isGarminConnectAppLocation(%q) = %v, want %v", tt.location, got, tt.want)
 		}
 	}
 }
@@ -65,9 +65,9 @@ func TestShouldStopGarminBrowserFallback(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "Garmin 427 tries the next base",
+			name: "Garmin 427 stops legacy mutation fallback",
 			resp: browserPostResponse{Status: 427, Body: `{"error":{"status-code":"427"}}`},
-			want: false,
+			want: true,
 		},
 		{
 			name: "rate limit stops fallback fanout",

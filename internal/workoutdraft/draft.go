@@ -106,6 +106,12 @@ func (s Store) Save(d Draft) error {
 	replaced := false
 	for i := range all {
 		if all[i].ID == d.ID {
+			if d.UploadedWorkout == "" {
+				d.UploadedWorkout = all[i].UploadedWorkout
+				d.ScheduledID = all[i].ScheduledID
+				d.ScheduledDate = all[i].ScheduledDate
+				d.AppliedAt = all[i].AppliedAt
+			}
 			all[i] = d
 			replaced = true
 			break
@@ -282,16 +288,19 @@ func parseSetRepeat(s string) (Step, bool) {
 }
 
 func parseRepeat(s string) (Step, bool) {
-	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)(?:\s+(?:at\s+)?(.+?))?(?:\s+with\s+(.+))?$`)
-	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	workText, recoveryText := splitRecoveryClause(strings.TrimSpace(s))
+	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)?(?:\s+(?:at\s+)?(.+?))?$`)
+	m := re.FindStringSubmatch(workText)
 	if m == nil {
 		return Step{}, false
 	}
 	repeat, _ := strconv.Atoi(m[1])
 	dist, _ := strconv.ParseFloat(m[2], 64)
+	if m[3] == "" && dist < 100 {
+		return Step{}, false
+	}
 	unit := normalizeDistanceUnit(m[3])
 	target := strings.TrimSpace(m[4])
-	recoveryText := strings.TrimSpace(m[5])
 	if recoveryText == "" {
 		target, recoveryText = splitUntimedFullRecovery(target)
 	}
@@ -310,6 +319,8 @@ func parseRepeat(s string) (Step, bool) {
 	} else if recovery, ok := parseManualRecovery(recoveryText); ok {
 		children = append(children, recovery)
 		skipLastRecovery = true
+	} else if recovery := defaultRecoveryForRepeat(strings.ToLower(s)); recovery.DurationSec > 0 {
+		children = append(children, recovery)
 	}
 	return Step{
 		Name:             fmt.Sprintf("%dx%s%s", repeat, trimFloat(dist), unit),
@@ -332,15 +343,23 @@ func splitUntimedFullRecovery(target string) (string, string) {
 }
 
 func parseTimeRepeat(s string) (Step, bool) {
-	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds|")\s*(.*?)(?:\s+with\s+(.+))?$`)
-	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	workText, recoveryText := splitRecoveryClause(strings.TrimSpace(s))
+	re := regexp.MustCompile(`(?i)(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|"|min|mins|minute|minutes)\s*(.*?)$`)
+	m := re.FindStringSubmatch(workText)
 	if m == nil {
 		return Step{}, false
 	}
 	repeat, _ := strconv.Atoi(m[1])
-	seconds, _ := strconv.ParseFloat(m[2], 64)
-	label := strings.TrimSpace(m[3])
-	recoveryText := strings.TrimSpace(m[4])
+	value, _ := strconv.ParseFloat(m[2], 64)
+	unit := strings.ToLower(m[3])
+	seconds := value
+	durationLabel := trimFloat(value) + "s"
+	if strings.HasPrefix(unit, "min") {
+		seconds *= 60
+		durationLabel = trimFloat(value) + "min"
+	}
+	label := strings.TrimSpace(m[4])
+	label = regexp.MustCompile(`(?i)^at\s+`).ReplaceAllString(label, "")
 	if label == "" {
 		label = "Interval"
 	}
@@ -375,13 +394,22 @@ func parseTimeRepeat(s string) (Step, bool) {
 		children = append(children, recovery)
 	}
 	return Step{
-		Name:             fmt.Sprintf("%dx%ss %s", repeat, trimFloat(seconds), strings.ToLower(name)),
+		Name:             fmt.Sprintf("%dx%s %s", repeat, durationLabel, strings.ToLower(name)),
 		StepType:         "repeat",
 		Repeat:           repeat,
 		SkipLastRecovery: skipLastRecovery,
 		Steps:            children,
 		Notes:            strings.TrimSpace(s),
 	}, true
+}
+
+func splitRecoveryClause(text string) (string, string) {
+	lower := strings.ToLower(text)
+	index := strings.LastIndex(lower, " with ")
+	if index < 0 {
+		return text, ""
+	}
+	return strings.TrimSpace(text[:index]), strings.TrimSpace(text[index+len(" with "):])
 }
 
 func parseManualRecovery(s string) (Step, bool) {
@@ -506,7 +534,12 @@ func parseSingle(s string) (Step, bool) {
 		n, _ := strconv.ParseFloat(m[1], 64)
 		unit := normalizeDistanceUnit(m[2])
 		stepType := "interval"
-		if strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest") {
+		switch {
+		case strings.Contains(lower, "warm"):
+			stepType = "warmup"
+		case strings.Contains(lower, "cool"):
+			stepType = "cooldown"
+		case strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest"):
 			stepType = "recovery"
 		}
 		return Step{Name: fmt.Sprintf("%s%s", trimFloat(n), unit), StepType: stepType, Distance: n, DistanceUOM: unit, Target: extractTarget(s), Notes: s}, true
@@ -591,7 +624,7 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 		} else if step.Distance > 0 {
 			meters := distanceMeters(step.Distance, step.DistanceUOM)
 			item["endCondition"] = map[string]any{"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 3, "displayable": true}
-			item["endConditionValue"] = step.Distance
+			item["endConditionValue"] = meters
 			item["preferredEndConditionUnit"] = preferredDistanceUnit(step.DistanceUOM)
 			total += estimateDuration(step, meters)
 		} else {
@@ -634,6 +667,19 @@ func stepDescription(step Step) string {
 }
 
 func paceTarget(target string) (float64, float64, bool) {
+	if m := regexp.MustCompile(`(?i)(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*/?\s*(km|k|mile|mi)`).FindStringSubmatch(target); m != nil {
+		fastSecs, _ := strconv.Atoi(m[1])
+		fastFrac, _ := strconv.Atoi(m[2])
+		slowSecs, _ := strconv.Atoi(m[3])
+		slowFrac, _ := strconv.Atoi(m[4])
+		fast := float64(fastSecs*60 + fastFrac)
+		slow := float64(slowSecs*60 + slowFrac)
+		if normalizeDistanceUnit(m[5]) == "mi" {
+			fast /= 1.609344
+			slow /= 1.609344
+		}
+		return 1000 / fast, 1000 / slow, true
+	}
 	m := regexp.MustCompile(`(?i)(\d{1,2}):(\d{2})\s*/?\s*(km|k|mile|mi)`).FindStringSubmatch(target)
 	if m == nil {
 		return 0, 0, false
@@ -680,16 +726,15 @@ func distanceMeters(value float64, unit string) float64 {
 }
 
 // preferredDistanceUnit selects the unit shown by Garmin's distance picker.
-// endConditionValue is expressed in this unit; metres are only used internally
-// for workout-level estimates and duration calculations.
+// Garmin stores endConditionValue in metres while unit factors are centimetres.
 func preferredDistanceUnit(unit string) map[string]any {
 	switch normalizeDistanceUnit(unit) {
 	case "km":
-		return map[string]any{"unitKey": "kilometer", "factor": 1000.0}
+		return map[string]any{"unitKey": "kilometer", "factor": 100000.0}
 	case "mi":
-		return map[string]any{"unitKey": "mile", "factor": 1609.344}
+		return map[string]any{"unitKey": "mile", "factor": 160934.4}
 	default:
-		return map[string]any{"unitKey": "meter", "factor": 1.0}
+		return map[string]any{"unitKey": "meter", "factor": 100.0}
 	}
 }
 

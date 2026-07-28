@@ -69,6 +69,11 @@ func newWorkoutsReconcileCmd(flags *rootFlags) *cobra.Command {
 			if apply && expectDelete < 0 {
 				return usageErr(fmt.Errorf("--apply requires --expect-delete with the exact count shown by a dry run"))
 			}
+			if apply {
+				if err := checkGarminMutationCircuit(time.Now()); err != nil {
+					return err
+				}
+			}
 
 			schedules, err := parseWorkoutReconcileSchedules(scheduleValues)
 			if err != nil {
@@ -84,7 +89,7 @@ func newWorkoutsReconcileCmd(flags *rootFlags) *cobra.Command {
 
 			result := map[string]any{"applied": apply}
 			fmt.Fprintln(cmd.ErrOrStderr(), "Opening one Garmin browser session for workout reconciliation.")
-			fmt.Fprintln(cmd.ErrOrStderr(), "If Garmin asks, sign in and complete MFA in the visible Chrome window.")
+			fmt.Fprintln(cmd.ErrOrStderr(), "If Garmin asks, sign in and complete MFA in the visible browser window.")
 			_, err = verifyGarminBrowserProfileWithAction(cmd.Context(), profileDir, loginTimeout, func(browserCtx context.Context) error {
 				workouts, err := listGarminWorkoutsForReconcile(browserCtx, listLimit)
 				if err != nil {
@@ -357,10 +362,18 @@ func requireGarminBrowserResponse(ctx context.Context, method string, path strin
 		return browserPostResponse{}, err
 	}
 	if response.Status < 200 || response.Status >= 300 {
+		if method != "GET" && response.Status == 429 {
+			if err := recordGarminMutationRateLimit(response.Body, time.Now()); err != nil {
+				return response, configErr(fmt.Errorf("persisting Garmin mutation circuit: %w", err))
+			}
+		}
 		return response, garminBrowserHTTPError(method, path, response)
 	}
 	if bodyLooksLikeHTML(response.Body) {
 		return response, authErr(fmt.Errorf("Garmin browser %s %s returned HTML instead of API JSON", method, path))
+	}
+	if method != "GET" {
+		_ = clearGarminMutationCircuit()
 	}
 	return response, nil
 }

@@ -53,6 +53,11 @@ func garminBrowserRequestJSON(ctx context.Context, method string, path string, b
 }
 
 func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, path string, body any, headless bool) ([]byte, int, error) {
+	if method != "GET" {
+		if err := checkGarminMutationCircuit(time.Now()); err != nil {
+			return nil, 0, err
+		}
+	}
 	garminBrowserMu.Lock()
 	defer garminBrowserMu.Unlock()
 
@@ -71,6 +76,7 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 		chromedp.UserDataDir(profileDir),
 		chromedp.WindowSize(1280, 900),
 	}
+	opts = append(opts, garminBrowserExecOptions()...)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
 	browserCtx, cancel := chromedp.NewContext(allocCtx)
@@ -91,12 +97,28 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 		return nil, 0, fmt.Errorf("posting through Garmin browser session: %w", err)
 	}
 	if parsed.Status < 200 || parsed.Status >= 300 {
+		if method != "GET" && parsed.Status == 429 {
+			if err := recordGarminMutationRateLimit(parsed.Body, time.Now()); err != nil {
+				return []byte(parsed.Body), parsed.Status, configErr(fmt.Errorf("persisting Garmin mutation circuit: %w", err))
+			}
+		}
 		return []byte(parsed.Body), parsed.Status, garminBrowserHTTPError(method, path, parsed)
 	}
 	if bodyLooksLikeHTML(parsed.Body) {
 		return []byte(parsed.Body), parsed.Status, authErr(fmt.Errorf("Garmin browser %s %s returned Garmin app HTML, not API JSON; run auth login-browser again", method, path))
 	}
+	if method != "GET" {
+		_ = clearGarminMutationCircuit()
+	}
 	return []byte(parsed.Body), parsed.Status, nil
+}
+
+func garminBrowserExecOptions() []chromedp.ExecAllocatorOption {
+	path := strings.TrimSpace(os.Getenv("GARMIN_CONNECT_BROWSER_EXECUTABLE"))
+	if path == "" {
+		return nil
+	}
+	return []chromedp.ExecAllocatorOption{chromedp.ExecPath(path)}
 }
 
 func garminBrowserRequestFromPage(ctx context.Context, method string, path string, body any) (browserPostResponse, error) {
@@ -193,7 +215,7 @@ func evaluateGarminBrowserRequest(ctx context.Context, base string, method strin
 }
 
 func shouldStopGarminBrowserFallback(response browserPostResponse) bool {
-	if response.Status == 429 {
+	if response.Status == 427 || response.Status == 429 {
 		return true
 	}
 	return response.Status >= 200 && response.Status < 300 && !bodyLooksLikeHTML(response.Body)
@@ -219,9 +241,9 @@ func garminRateLimitRetryHint(body string) string {
 		RetryAfter int `json:"retry_after"`
 	}
 	if err := json.Unmarshal([]byte(body), &parsed); err == nil && parsed.RetryAfter > 0 {
-		return fmt.Sprintf("Wait at least %d seconds from retry_after before trying one saved draft again.", parsed.RetryAfter)
+		return fmt.Sprintf("The batch stopped. Garmin reported retry_after=%d seconds; the local mutation circuit uses a longer exponential cooldown and will refuse writes until it expires.", parsed.RetryAfter)
 	}
-	return "Wait for the cooldown to clear before trying one saved draft again."
+	return "The batch stopped. The local mutation circuit will refuse writes until its exponential cooldown expires."
 }
 
 func garminBrowserDefaultHeadless() bool {

@@ -21,6 +21,7 @@ func newWorkoutsCmd(flags *rootFlags) *cobra.Command {
 	cmd.AddCommand(newWorkoutsTypesCmd(flags))
 	cmd.AddCommand(newWorkoutsUploadJsonCmd(flags))
 	cmd.AddCommand(newNovelWorkoutsApplyCmd(flags))
+	cmd.AddCommand(newWorkoutsApplyBatchCmd(flags))
 	cmd.AddCommand(newNovelWorkoutsPlanCmd(flags))
 	cmd.AddCommand(newNovelWorkoutsSyncCheckCmd(flags))
 	return cmd

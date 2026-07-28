@@ -148,8 +148,8 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 	var profileDir string
 	cmd := &cobra.Command{
 		Use:   "login-browser",
-		Short: "Login through Garmin Connect in Chrome",
-		Long:  "Opens a visible Chrome window. Sign in to Garmin Connect there; the CLI verifies the signed-in browser profile and saves a local Garmin web session for later workout writes.",
+		Short: "Login through Garmin Connect in a browser",
+		Long:  "Opens a visible browser window. Sign in to Garmin Connect there; the CLI verifies the signed-in browser profile and saves a local Garmin web session for later workout writes.",
 		Example: strings.Join([]string{
 			"  garmin-connect-workout-cli auth login-browser",
 			"  garmin-connect-workout-cli auth login-browser --timeout 5m",
@@ -178,7 +178,7 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 				return configErr(fmt.Errorf("securing browser profile dir: %w", err))
 			}
 
-			fmt.Fprintln(cmd.ErrOrStderr(), "Opening Chrome for Garmin Connect login.")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Opening a browser for Garmin Connect login.")
 			fmt.Fprintln(cmd.ErrOrStderr(), "Sign in and complete MFA in the browser. Leave this terminal open.")
 			session, err := verifyGarminBrowserProfile(cmd.Context(), profileDir, timeout)
 			if err != nil {
@@ -205,7 +205,7 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Maximum time to wait for browser login")
-	cmd.Flags().StringVar(&profileDir, "profile-dir", "", "Chrome profile directory for Garmin login cookies")
+	cmd.Flags().StringVar(&profileDir, "profile-dir", "", "Browser profile directory for Garmin login cookies")
 	return cmd
 }
 
@@ -222,6 +222,7 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 		chromedp.UserDataDir(profileDir),
 		chromedp.WindowSize(1280, 900),
 	}
+	opts = append(opts, garminBrowserExecOptions()...)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
 	defer allocCancel()
 	ctx, cancel := chromedp.NewContext(allocCtx)
@@ -236,21 +237,16 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 		network.Enable(),
 		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
 	); err != nil {
-		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in Chrome: %w", err)
+		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in the browser: %w", err)
 	}
 
 	ticker := time.NewTicker(750 * time.Millisecond)
 	defer ticker.Stop()
-	nextStatus := time.Now()
 	lastLocation := ""
-	lastStatus := 0
 	for {
 		select {
 		case <-ctx.Done():
-			if lastStatus != 0 {
-				return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; last Garmin API status was HTTP %d", lastStatus)
-			}
-			return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; sign in and complete MFA in Chrome")
+			return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; sign in and complete MFA in the browser")
 		case <-ticker.C:
 			location, err := browserLocation(ctx)
 			if err == nil && location != "" {
@@ -258,56 +254,32 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 			} else if err != nil && !isTransientChromeContextError(err) {
 				return garminsession.Session{}, err
 			}
-			if !time.Now().After(nextStatus) || !shouldProbeGarminLogin(lastLocation) {
+			if !isGarminConnectAppLocation(lastLocation) {
 				continue
 			}
-			nextStatus = time.Now().Add(10 * time.Second)
-			fmt.Fprintf(os.Stderr, "Checking Garmin browser login from: %s\n", lastLocation)
-			status, body, err := browserWorkoutListProbe(ctx)
+			markGarminPageActivity(lastLocation, capture)
+			session, ok, err := currentCapturedSession(ctx, capture)
 			if err != nil {
 				if isTransientChromeContextError(err) {
 					continue
 				}
 				return garminsession.Session{}, err
 			}
-			if status == 429 {
-				return garminsession.Session{}, rateLimitErr(fmt.Errorf("Garmin rate limited browser-login verification. %s", garminRateLimitRetryHint(body)))
-			}
-			if status != 0 {
-				lastStatus = status
-			}
-			if status >= 200 && status < 300 && !bodyLooksLikeHTML(body) {
-				markGarminSessionSeen(capture)
-				session, ok, err := currentCapturedSession(ctx, capture)
-				if err != nil {
-					return garminsession.Session{}, err
-				}
-				if ok && session.Active(time.Now()) {
-					if action != nil {
-						if err := chromedp.Run(ctx, chromedp.ActionFunc(action)); err != nil {
-							return garminsession.Session{}, err
-						}
+			if ok && session.Active(time.Now()) {
+				if action != nil {
+					if err := chromedp.Run(ctx, chromedp.ActionFunc(action)); err != nil {
+						return garminsession.Session{}, err
 					}
-					return session, nil
 				}
+				return session, nil
 			}
 		}
 	}
 }
 
-func shouldProbeGarminLogin(location string) bool {
+func isGarminConnectAppLocation(location string) bool {
 	parsed, err := url.Parse(location)
 	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com" && strings.HasPrefix(parsed.Path, "/app/")
-}
-
-func browserWorkoutListProbe(ctx context.Context) (int, string, error) {
-	var parsed browserPostResponse
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		response, err := garminBrowserRequestFromPage(ctx, "GET", "/workout-service/workouts?start=0&limit=1", nil)
-		parsed = response
-		return err
-	}))
-	return parsed.Status, parsed.Body, err
 }
 
 type webSessionCapture struct {
@@ -377,6 +349,7 @@ func captureGarminWebSession(parent context.Context, profileDir string, timeout 
 		chromedp.UserDataDir(profileDir),
 		chromedp.WindowSize(1280, 900),
 	}
+	opts = append(opts, garminBrowserExecOptions()...)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
 	defer allocCancel()
 	ctx, cancel := chromedp.NewContext(allocCtx)
@@ -391,7 +364,7 @@ func captureGarminWebSession(parent context.Context, profileDir string, timeout 
 		network.Enable(),
 		chromedp.Navigate("https://connect.garmin.com/modern/workouts"),
 	); err != nil {
-		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in Chrome: %w", err)
+		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in the browser: %w", err)
 	}
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -479,7 +452,7 @@ func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (ga
 		if isTransientChromeContextError(err) {
 			return garminsession.Session{}, false, nil
 		}
-		return garminsession.Session{}, false, fmt.Errorf("reading Garmin cookies from Chrome: %w", err)
+		return garminsession.Session{}, false, fmt.Errorf("reading Garmin cookies from the browser: %w", err)
 	}
 	cookie := cookieHeader(cookies)
 	if cookie == "" {
@@ -672,7 +645,7 @@ func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
 			fmt.Fprintln(w, "Run:")
 			fmt.Fprintln(w, "  garmin-connect-workout-cli auth login-browser")
 			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "That opens Chrome so Garmin handles password and MFA directly.")
+			fmt.Fprintln(w, "That opens a browser so Garmin handles password and MFA directly.")
 			if !launch {
 				return nil
 			}
@@ -737,7 +710,7 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 			if !authed {
 				fmt.Fprintln(w, red("Not authenticated"))
 				fmt.Fprintln(w, "")
-				fmt.Fprintln(w, "Login through Garmin Connect in Chrome:")
+				fmt.Fprintln(w, "Login through Garmin Connect in a browser:")
 				fmt.Fprintf(w, "  garmin-connect-workout-cli auth login-browser\n")
 				return authErr(fmt.Errorf("no credentials configured"))
 			}

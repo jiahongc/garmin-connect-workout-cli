@@ -1,6 +1,11 @@
 package workoutdraft
 
-import "testing"
+import (
+	"math"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestPlanParsesRepeatWorkout(t *testing.T) {
 	draft, err := Plan("10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown", "2026-07-01", "")
@@ -25,6 +30,132 @@ func TestPlanParsesRepeatWorkout(t *testing.T) {
 	}
 	if draft.GarminPayload["workoutName"] != "July 1: Run 6X800M" {
 		t.Fatalf("payload did not carry workout name: %#v", draft.GarminPayload["workoutName"])
+	}
+}
+
+func TestPlanInfersMetersForStandardUnitlessTrackRepeats(t *testing.T) {
+	draft, err := Plan("6x800 at 5K pace with 2 min jog", "2026-07-01", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	repeat := draft.Workout.Steps[0]
+	if repeat.StepType != "repeat" || repeat.Repeat != 6 || len(repeat.Steps) != 2 {
+		t.Fatalf("repeat = %#v, want six work/recovery repeats", repeat)
+	}
+	if got := repeat.Steps[0]; got.Distance != 800 || got.DistanceUOM != "m" {
+		t.Fatalf("work step = %#v, want 800 meters", got)
+	}
+}
+
+func TestPlanUsesStandardRecoveryForDistanceStrides(t *testing.T) {
+	draft, err := Plan("4x100m strides relaxed", "2026-07-01", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	repeat := draft.Workout.Steps[0]
+	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 60 {
+		t.Fatalf("repeat = %#v, want a standard 60-second stride recovery", repeat)
+	}
+}
+
+func TestPlanUnderstandsMinuteBasedRepeatShorthand(t *testing.T) {
+	draft, err := Plan("4x3min at threshold with 90 sec jog", "2026-07-01", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	repeat := draft.Workout.Steps[0]
+	if repeat.StepType != "repeat" || repeat.Repeat != 4 || len(repeat.Steps) != 2 {
+		t.Fatalf("repeat = %#v, want four work/recovery repeats", repeat)
+	}
+	if got := repeat.Steps[0]; got.DurationSec != 180 || got.Target != "threshold" {
+		t.Fatalf("work step = %#v, want three minutes at threshold", got)
+	}
+	if got := repeat.Steps[1]; got.DurationSec != 90 || got.StepType != "recovery" {
+		t.Fatalf("recovery step = %#v, want 90-second recovery", got)
+	}
+}
+
+func TestClarificationsOnlyFlagsMaterialWorkoutAmbiguity(t *testing.T) {
+	for _, prompt := range []string{
+		"10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown",
+		"35min easy + drills + 4x20s strides relaxed",
+		"30 min easy, 6x10s hill sprints with walk down the hill",
+		"4x200m relaxed fast with full recovery",
+		"4x100m strides relaxed",
+		"6x800 at 5K pace with 2 min jog",
+		"4x3min at threshold with 90 sec jog",
+		"9mi medium long easy, 2 sets of (4x200m at 5:10-5:50/mi with 200m jog)",
+		"2mi warmup easy, 2 sets of (1km at 5:55-6:35/mi, 90 sec recovery, 800m at 5:30-6:10/mi, 90 sec recovery, 400m at 5:10-5:50/mi) with 3 min recovery between sets, 3.27mi cooldown easy",
+		"2mi warmup easy, 2 sets of (5 min at 6:20-7:00/mi, 1 min float, 4 min at 6:10-6:50/mi, 1 min float, 3 min at 5:55-6:35/mi, 1 min float, 2 min at 5:30-6:10/mi, 1 min float, 1 min at 5:10-5:50/mi) with 3 min jog between sets, 5 min cooldown easy",
+	} {
+		if got := Clarifications(prompt); len(got) != 0 {
+			t.Fatalf("Clarifications(%q) = %#v, want none", prompt, got)
+		}
+	}
+}
+
+func TestClarificationsExplainMissingWorkoutDetails(t *testing.T) {
+	tests := []struct {
+		name       string
+		prompt     string
+		wantCode   string
+		wantPhrase string
+	}{
+		{
+			name:       "normal repeats need recovery",
+			prompt:     "10 min warmup, 6x800m at 5K pace, 10 min cooldown",
+			wantCode:   "repeat_recovery",
+			wantPhrase: "recovery",
+		},
+		{
+			name:       "normal repeats need an effort",
+			prompt:     "6x800m with 2 min jog",
+			wantCode:   "repeat_target",
+			wantPhrase: "pace or effort",
+		},
+		{
+			name:       "vague recovery needs duration or manual cue",
+			prompt:     "6x800m at 5K pace with jog",
+			wantCode:   "repeat_recovery",
+			wantPhrase: "how long or how far",
+		},
+		{
+			name:       "repeat distance needs a unit",
+			prompt:     "4x1 at 5K pace with 2 min jog",
+			wantCode:   "repeat_unit",
+			wantPhrase: "meters",
+		},
+		{
+			name:       "warmup needs a duration",
+			prompt:     "warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown",
+			wantCode:   "step_duration",
+			wantPhrase: "warmup",
+		},
+		{
+			name:       "total distance needs completion rule",
+			prompt:     "8mi total: 2mi warmup + 4x1mi at 5K pace with 400m jog + cooldown",
+			wantCode:   "total_distance",
+			wantPhrase: "8mi total",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			questions := Clarifications(tc.prompt)
+			if len(questions) == 0 {
+				t.Fatalf("Clarifications(%q) returned no questions", tc.prompt)
+			}
+			var found bool
+			for _, question := range questions {
+				if question.Code == tc.wantCode && strings.Contains(strings.ToLower(question.Question), strings.ToLower(tc.wantPhrase)) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("Clarifications(%q) = %#v, want code %q containing %q", tc.prompt, questions, tc.wantCode, tc.wantPhrase)
+			}
+		})
 	}
 }
 
@@ -193,14 +324,37 @@ func TestPlanAddsPaceZoneForExplicitPace(t *testing.T) {
 	}
 }
 
+func TestPlanUsesExplicitPaceRange(t *testing.T) {
+	draft, err := Plan("1 km at 5:55-6:35/mi", "2026-07-28", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	step := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
+	target := step["targetType"].(map[string]any)
+	if target["workoutTargetTypeKey"] != "pace.zone" {
+		t.Fatalf("expected pace zone target, got %#v", target)
+	}
+	wantFast := 1000 / ((5*60 + 55) / 1.609344)
+	wantSlow := 1000 / ((6*60 + 35) / 1.609344)
+	if got := step["targetValueOne"].(float64); math.Abs(got-wantFast) > 0.001 {
+		t.Fatalf("fast range bound = %v, want %v", got, wantFast)
+	}
+	if got := step["targetValueTwo"].(float64); math.Abs(got-wantSlow) > 0.001 {
+		t.Fatalf("slow range bound = %v, want %v", got, wantSlow)
+	}
+}
+
 func TestPlanPreservesDistancePickerUnit(t *testing.T) {
 	for _, tc := range []struct {
 		prompt  string
-		value   float64
+		meters  float64
 		unitKey string
+		factor  float64
 	}{
-		{prompt: "8.45 mi easy", value: 8.45, unitKey: "mile"},
-		{prompt: "2.41 km easy", value: 2.41, unitKey: "kilometer"},
+		{prompt: "8.45 mi easy", meters: 8.45 * 1609.344, unitKey: "mile", factor: 160934.4},
+		{prompt: "2.41 km easy", meters: 2410, unitKey: "kilometer", factor: 100000},
+		{prompt: "800 m easy", meters: 800, unitKey: "meter", factor: 100},
 	} {
 		draft, err := Plan(tc.prompt, "2026-07-23", "")
 		if err != nil {
@@ -208,13 +362,60 @@ func TestPlanPreservesDistancePickerUnit(t *testing.T) {
 		}
 		segments := draft.GarminPayload["workoutSegments"].([]any)
 		step := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
-		if step["endConditionValue"] != tc.value {
-			t.Fatalf("Plan(%q) end condition value = %#v, want %v", tc.prompt, step["endConditionValue"], tc.value)
+		if got := step["endConditionValue"].(float64); math.Abs(got-tc.meters) > 0.001 {
+			t.Fatalf("Plan(%q) end condition value = %#v, want %v meters", tc.prompt, got, tc.meters)
 		}
 		unit := step["preferredEndConditionUnit"].(map[string]any)
 		if unit["unitKey"] != tc.unitKey {
 			t.Fatalf("Plan(%q) picker unit = %#v, want %q", tc.prompt, unit, tc.unitKey)
 		}
+		if unit["factor"] != tc.factor {
+			t.Fatalf("Plan(%q) picker factor = %#v, want %v", tc.prompt, unit["factor"], tc.factor)
+		}
+	}
+}
+
+func TestPlanUsesWarmupAndCooldownTypesForDistanceSteps(t *testing.T) {
+	draft, err := Plan("2mi warmup easy, 3mi cooldown easy", "2026-07-28", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	steps := segments[0].(map[string]any)["workoutSteps"].([]any)
+	if got := steps[0].(map[string]any)["stepType"].(map[string]any)["stepTypeKey"]; got != "warmup" {
+		t.Fatalf("warmup step type = %#v, want warmup", got)
+	}
+	if got := steps[1].(map[string]any)["stepType"].(map[string]any)["stepTypeKey"]; got != "cooldown" {
+		t.Fatalf("cooldown step type = %#v, want cooldown", got)
+	}
+}
+
+func TestStoreSavePreservesAppliedGarminLinkageWhenReplanningSameDraft(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
+	draft, err := Plan("2mi warmup easy", "2026-07-28", "Tuesday: Warmup")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if err := store.Save(draft); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if err := store.MarkApplied(draft.ID, "workout-42", "schedule-99", draft.Date); err != nil {
+		t.Fatalf("MarkApplied returned error: %v", err)
+	}
+
+	replanned, err := Plan(draft.Prompt, draft.Date, draft.Name)
+	if err != nil {
+		t.Fatalf("replanning returned error: %v", err)
+	}
+	if err := store.Save(replanned); err != nil {
+		t.Fatalf("saving replanned draft returned error: %v", err)
+	}
+	saved, err := store.Get(draft.ID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if saved.UploadedWorkout != "workout-42" || saved.ScheduledID != "schedule-99" || saved.ScheduledDate != draft.Date || saved.AppliedAt == nil {
+		t.Fatalf("replanned draft lost Garmin linkage: %#v", saved)
 	}
 }
 
