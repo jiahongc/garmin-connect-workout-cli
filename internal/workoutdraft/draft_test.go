@@ -1,6 +1,9 @@
 package workoutdraft
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestPlanParsesRepeatWorkout(t *testing.T) {
 	draft, err := Plan("10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown", "2026-07-01", "")
@@ -190,6 +193,27 @@ func TestPlanAddsPaceZoneForExplicitPace(t *testing.T) {
 	}
 	if interval["targetValueOne"].(float64) <= interval["targetValueTwo"].(float64) {
 		t.Fatalf("Garmin pace target should store faster speed first: %#v", interval)
+	}
+}
+
+func TestPlanUsesExplicitPaceRange(t *testing.T) {
+	draft, err := Plan("1 km at 5:55-6:35/mi", "2026-07-28", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	step := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
+	target := step["targetType"].(map[string]any)
+	if target["workoutTargetTypeKey"] != "pace.zone" {
+		t.Fatalf("expected pace zone target, got %#v", target)
+	}
+	wantFast := 1000 / ((5*60 + 55) / 1.609344)
+	wantSlow := 1000 / ((6*60 + 35) / 1.609344)
+	if got := step["targetValueOne"].(float64); math.Abs(got-wantFast) > 0.001 {
+		t.Fatalf("fast range bound = %v, want %v", got, wantFast)
+	}
+	if got := step["targetValueTwo"].(float64); math.Abs(got-wantSlow) > 0.001 {
+		t.Fatalf("slow range bound = %v, want %v", got, wantSlow)
 	}
 }
 

@@ -634,6 +634,19 @@ func stepDescription(step Step) string {
 }
 
 func paceTarget(target string) (float64, float64, bool) {
+	if m := regexp.MustCompile(`(?i)(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*/?\s*(km|k|mile|mi)`).FindStringSubmatch(target); m != nil {
+		fastSecs, _ := strconv.Atoi(m[1])
+		fastFrac, _ := strconv.Atoi(m[2])
+		slowSecs, _ := strconv.Atoi(m[3])
+		slowFrac, _ := strconv.Atoi(m[4])
+		fast := float64(fastSecs*60 + fastFrac)
+		slow := float64(slowSecs*60 + slowFrac)
+		if normalizeDistanceUnit(m[5]) == "mi" {
+			fast /= 1.609344
+			slow /= 1.609344
+		}
+		return 1000 / fast, 1000 / slow, true
+	}
 	m := regexp.MustCompile(`(?i)(\d{1,2}):(\d{2})\s*/?\s*(km|k|mile|mi)`).FindStringSubmatch(target)
 	if m == nil {
 		return 0, 0, false
