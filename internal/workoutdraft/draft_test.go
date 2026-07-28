@@ -2,6 +2,7 @@ package workoutdraft
 
 import (
 	"math"
+	"path/filepath"
 	"testing"
 )
 
@@ -220,11 +221,13 @@ func TestPlanUsesExplicitPaceRange(t *testing.T) {
 func TestPlanPreservesDistancePickerUnit(t *testing.T) {
 	for _, tc := range []struct {
 		prompt  string
-		value   float64
+		meters  float64
 		unitKey string
+		factor  float64
 	}{
-		{prompt: "8.45 mi easy", value: 8.45, unitKey: "mile"},
-		{prompt: "2.41 km easy", value: 2.41, unitKey: "kilometer"},
+		{prompt: "8.45 mi easy", meters: 8.45 * 1609.344, unitKey: "mile", factor: 160934.4},
+		{prompt: "2.41 km easy", meters: 2410, unitKey: "kilometer", factor: 100000},
+		{prompt: "800 m easy", meters: 800, unitKey: "meter", factor: 100},
 	} {
 		draft, err := Plan(tc.prompt, "2026-07-23", "")
 		if err != nil {
@@ -232,13 +235,60 @@ func TestPlanPreservesDistancePickerUnit(t *testing.T) {
 		}
 		segments := draft.GarminPayload["workoutSegments"].([]any)
 		step := segments[0].(map[string]any)["workoutSteps"].([]any)[0].(map[string]any)
-		if step["endConditionValue"] != tc.value {
-			t.Fatalf("Plan(%q) end condition value = %#v, want %v", tc.prompt, step["endConditionValue"], tc.value)
+		if got := step["endConditionValue"].(float64); math.Abs(got-tc.meters) > 0.001 {
+			t.Fatalf("Plan(%q) end condition value = %#v, want %v meters", tc.prompt, got, tc.meters)
 		}
 		unit := step["preferredEndConditionUnit"].(map[string]any)
 		if unit["unitKey"] != tc.unitKey {
 			t.Fatalf("Plan(%q) picker unit = %#v, want %q", tc.prompt, unit, tc.unitKey)
 		}
+		if unit["factor"] != tc.factor {
+			t.Fatalf("Plan(%q) picker factor = %#v, want %v", tc.prompt, unit["factor"], tc.factor)
+		}
+	}
+}
+
+func TestPlanUsesWarmupAndCooldownTypesForDistanceSteps(t *testing.T) {
+	draft, err := Plan("2mi warmup easy, 3mi cooldown easy", "2026-07-28", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	segments := draft.GarminPayload["workoutSegments"].([]any)
+	steps := segments[0].(map[string]any)["workoutSteps"].([]any)
+	if got := steps[0].(map[string]any)["stepType"].(map[string]any)["stepTypeKey"]; got != "warmup" {
+		t.Fatalf("warmup step type = %#v, want warmup", got)
+	}
+	if got := steps[1].(map[string]any)["stepType"].(map[string]any)["stepTypeKey"]; got != "cooldown" {
+		t.Fatalf("cooldown step type = %#v, want cooldown", got)
+	}
+}
+
+func TestStoreSavePreservesAppliedGarminLinkageWhenReplanningSameDraft(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
+	draft, err := Plan("2mi warmup easy", "2026-07-28", "Tuesday: Warmup")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if err := store.Save(draft); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if err := store.MarkApplied(draft.ID, "workout-42", "schedule-99", draft.Date); err != nil {
+		t.Fatalf("MarkApplied returned error: %v", err)
+	}
+
+	replanned, err := Plan(draft.Prompt, draft.Date, draft.Name)
+	if err != nil {
+		t.Fatalf("replanning returned error: %v", err)
+	}
+	if err := store.Save(replanned); err != nil {
+		t.Fatalf("saving replanned draft returned error: %v", err)
+	}
+	saved, err := store.Get(draft.ID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if saved.UploadedWorkout != "workout-42" || saved.ScheduledID != "schedule-99" || saved.ScheduledDate != draft.Date || saved.AppliedAt == nil {
+		t.Fatalf("replanned draft lost Garmin linkage: %#v", saved)
 	}
 }
 

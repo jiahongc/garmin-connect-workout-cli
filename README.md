@@ -6,12 +6,12 @@ Garmin does not provide a public consumer API for creating workouts. This tool u
 
 The main flow is:
 
-1. Sign in to Garmin Connect once in a real Chrome window.
+1. Sign in to Garmin Connect once in a real browser window.
 2. Ask the CLI to turn a workout description into a Garmin workout draft.
 3. Review the generated payload.
 4. Apply it to Garmin Connect. If the draft has a date, the CLI also adds it to the Garmin calendar by default.
 
-The CLI can also list, inspect, update, delete, and schedule existing Garmin workouts. Routine single-workout commands reuse the saved Garmin session automatically. For a multi-workout cleanup, `workouts reconcile` keeps one visible authenticated Chrome session open while the CLI performs and verifies the API operations.
+The CLI can also list, inspect, update, delete, and schedule existing Garmin workouts. Routine single-workout commands reuse the saved Garmin session automatically. For a multi-workout cleanup, `workouts reconcile` keeps one visible authenticated browser session open while the CLI performs and verifies the API operations.
 
 ## Install
 
@@ -44,9 +44,9 @@ garmin-connect-workout-cli auth login-browser
 
 What happens:
 
-- The CLI opens a visible Chrome window.
+- The CLI opens a visible browser window (Chrome by default, or the configured Chromium-based browser).
 - You sign in to Garmin Connect and complete MFA there.
-- The CLI verifies that the browser profile can read Garmin workouts.
+- The CLI captures the signed-in browser session for later verified workout reads and writes.
 - The CLI saves a local Garmin web session for later workout uploads and schedule changes.
 
 The saved browser profile and session are local secrets. Do not share them.
@@ -78,6 +78,48 @@ Use the returned `draft_id`, review the payload, then apply it:
 ```bash
 garmin-connect-workout-cli workouts apply draft_abc123 --apply --json
 ```
+
+Distance units are preserved per step in Garmin's editor: mile steps remain
+miles, kilometer steps remain kilometers, and meter steps remain meters.
+Garmin's private API stores the canonical distance in meters, so the payload
+also includes the original preferred-unit metadata that controls the editor's
+distance picker.
+
+For multiple dated drafts, preview and apply them together. `apply-batch` opens
+one visible browser session, discovers a working Garmin backend with a safe
+read, spaces every API request and keeps at least ten seconds between mutations,
+checkpoints each successful upload, and verifies every calendar date:
+
+```bash
+garmin-connect-workout-cli workouts apply-batch draft_a draft_b --json
+
+garmin-connect-workout-cli workouts apply-batch draft_a draft_b \
+  --apply \
+  --yes \
+  --idempotent \
+  --json
+```
+
+To repair drafts that were already uploaded, update the existing Garmin workout
+IDs in place instead of creating duplicates:
+
+```bash
+garmin-connect-workout-cli workouts apply-batch draft_a draft_b \
+  --replace-uploaded \
+  --apply \
+  --yes \
+  --idempotent \
+  --json
+```
+
+The replacement path reads each workout back from Garmin and verifies its name,
+step types, distances, original distance units, targets, and repeat structure.
+Existing calendar entries remain attached to the same workout IDs.
+
+HTTP 427 is handled by verifying that the mutation did not land before another
+backend is tried. HTTP 429 stops the whole batch and opens a persistent local
+circuit breaker; later commands refuse before opening the browser until the
+cooldown expires.
 
 If the draft has `--date`, `workouts apply` schedules it on that date automatically. To upload without adding it to the Garmin calendar:
 
@@ -138,7 +180,7 @@ Both commands are live Garmin writes. `workouts delete` removes the workout temp
 
 `workouts reconcile` is for replacing a cluttered Garmin workout library with an exact desired set. It can also ensure that selected kept workouts are present on their intended calendar dates. The behavior is based on exact workout names rather than a hard-coded date rule, so the same command works for any training plan.
 
-Run it without `--apply` first. This opens one visible Chrome session, reads the live Garmin library, validates that every kept name matches exactly one workout, and prints the proposed counts without changing Garmin:
+Run it without `--apply` first. This opens one visible browser session, reads the live Garmin library, validates that every kept name matches exactly one workout, and prints the proposed counts without changing Garmin:
 
 ```bash
 garmin-connect-workout-cli workouts reconcile \
@@ -246,17 +288,25 @@ Agent safety rules:
 
 ## Browser Behavior
 
-Login uses visible Chrome because Garmin sign-in and MFA are interactive.
+Login uses a visible browser because Garmin sign-in and MFA are interactive.
 
-Workout reads and writes are private Garmin Connect web API calls. The CLI uses a direct API token when available; otherwise it sends requests through the saved signed-in Chrome profile in a headless browser context. This is internal to the CLI and does not open a browser window during normal `workouts list`, `workouts get`, or `workouts apply` commands. To debug that session-backed path visibly:
+Workout reads and writes are private Garmin Connect web API calls. The CLI uses a direct API token when available; otherwise it sends requests through the saved signed-in browser profile in a headless browser context. This is internal to the CLI and does not open a browser window during normal `workouts list`, `workouts get`, or `workouts apply` commands. To debug that session-backed path visibly:
 
 ```bash
 GARMIN_CONNECT_BROWSER_HEADLESS=0 garmin-connect-workout-cli workouts apply draft_abc123 --apply
 ```
 
-`workouts reconcile` intentionally opens one visible Chrome window and keeps that authenticated context alive for the complete read/delete/schedule/verify sequence. The CLI sends API requests from that context; it does not click through the Garmin website UI.
+To use a Chromium-compatible browser other than Chrome for both login and
+session-backed requests, set its executable path:
 
-The login persists in the local Chrome profile until Garmin expires or invalidates it. If writes start returning an auth error, run:
+```bash
+GARMIN_CONNECT_BROWSER_EXECUTABLE="/Applications/Comet.app/Contents/MacOS/Comet" \
+  garmin-connect-workout-cli auth login-browser
+```
+
+`workouts reconcile` intentionally opens one visible browser window and keeps that authenticated context alive for the complete read/delete/schedule/verify sequence. The CLI sends API requests from that context; it does not click through the Garmin website UI.
+
+The login persists in the local browser profile until Garmin expires or invalidates it. If writes start returning an auth error, run:
 
 ```bash
 garmin-connect-workout-cli auth login-browser

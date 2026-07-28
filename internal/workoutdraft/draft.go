@@ -106,6 +106,12 @@ func (s Store) Save(d Draft) error {
 	replaced := false
 	for i := range all {
 		if all[i].ID == d.ID {
+			if d.UploadedWorkout == "" {
+				d.UploadedWorkout = all[i].UploadedWorkout
+				d.ScheduledID = all[i].ScheduledID
+				d.ScheduledDate = all[i].ScheduledDate
+				d.AppliedAt = all[i].AppliedAt
+			}
 			all[i] = d
 			replaced = true
 			break
@@ -506,7 +512,12 @@ func parseSingle(s string) (Step, bool) {
 		n, _ := strconv.ParseFloat(m[1], 64)
 		unit := normalizeDistanceUnit(m[2])
 		stepType := "interval"
-		if strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest") {
+		switch {
+		case strings.Contains(lower, "warm"):
+			stepType = "warmup"
+		case strings.Contains(lower, "cool"):
+			stepType = "cooldown"
+		case strings.Contains(lower, "recover") || strings.Contains(lower, "jog") || strings.Contains(lower, "rest"):
 			stepType = "recovery"
 		}
 		return Step{Name: fmt.Sprintf("%s%s", trimFloat(n), unit), StepType: stepType, Distance: n, DistanceUOM: unit, Target: extractTarget(s), Notes: s}, true
@@ -591,7 +602,7 @@ func garminSteps(steps []Step, order *int) ([]any, int) {
 		} else if step.Distance > 0 {
 			meters := distanceMeters(step.Distance, step.DistanceUOM)
 			item["endCondition"] = map[string]any{"conditionTypeId": 3, "conditionTypeKey": "distance", "displayOrder": 3, "displayable": true}
-			item["endConditionValue"] = step.Distance
+			item["endConditionValue"] = meters
 			item["preferredEndConditionUnit"] = preferredDistanceUnit(step.DistanceUOM)
 			total += estimateDuration(step, meters)
 		} else {
@@ -693,16 +704,15 @@ func distanceMeters(value float64, unit string) float64 {
 }
 
 // preferredDistanceUnit selects the unit shown by Garmin's distance picker.
-// endConditionValue is expressed in this unit; metres are only used internally
-// for workout-level estimates and duration calculations.
+// Garmin stores endConditionValue in metres while unit factors are centimetres.
 func preferredDistanceUnit(unit string) map[string]any {
 	switch normalizeDistanceUnit(unit) {
 	case "km":
-		return map[string]any{"unitKey": "kilometer", "factor": 1000.0}
+		return map[string]any{"unitKey": "kilometer", "factor": 100000.0}
 	case "mi":
-		return map[string]any{"unitKey": "mile", "factor": 1609.344}
+		return map[string]any{"unitKey": "mile", "factor": 160934.4}
 	default:
-		return map[string]any{"unitKey": "meter", "factor": 1.0}
+		return map[string]any{"unitKey": "meter", "factor": 100.0}
 	}
 }
 
