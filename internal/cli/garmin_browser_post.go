@@ -193,7 +193,7 @@ func evaluateGarminBrowserRequest(ctx context.Context, base string, method strin
 }
 
 func shouldStopGarminBrowserFallback(response browserPostResponse) bool {
-	if response.Status == 429 {
+	if response.Status == 427 || response.Status == 429 {
 		return true
 	}
 	return response.Status >= 200 && response.Status < 300 && !bodyLooksLikeHTML(response.Body)

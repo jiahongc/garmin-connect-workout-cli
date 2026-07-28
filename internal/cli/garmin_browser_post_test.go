@@ -65,9 +65,9 @@ func TestShouldStopGarminBrowserFallback(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "Garmin 427 tries the next base",
+			name: "Garmin 427 stops fallback to prevent duplicate writes",
 			resp: browserPostResponse{Status: 427, Body: `{"error":{"status-code":"427"}}`},
-			want: false,
+			want: true,
 		},
 		{
 			name: "rate limit stops fallback fanout",
