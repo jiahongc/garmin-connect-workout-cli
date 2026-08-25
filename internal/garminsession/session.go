@@ -23,10 +23,26 @@ const (
 type Session struct {
 	Authorization string    `json:"authorization,omitempty"`
 	Cookie        string    `json:"cookie,omitempty"`
+	Cookies       []Cookie  `json:"cookies,omitempty"`
 	UserAgent     string    `json:"user_agent,omitempty"`
 	BaseURL       string    `json:"base_url,omitempty"`
 	CapturedAt    time.Time `json:"captured_at"`
+	VerifiedAt    time.Time `json:"verified_at,omitempty"`
 	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+}
+
+// Cookie preserves the browser attributes required to restore an authenticated
+// Garmin session without widening a cookie to unrelated Garmin origins.
+type Cookie struct {
+	Name     string  `json:"name"`
+	Value    string  `json:"value"`
+	Domain   string  `json:"domain"`
+	Path     string  `json:"path,omitempty"`
+	Expires  float64 `json:"expires,omitempty"`
+	HTTPOnly bool    `json:"http_only,omitempty"`
+	Secure   bool    `json:"secure,omitempty"`
+	Session  bool    `json:"session,omitempty"`
+	SameSite string  `json:"same_site,omitempty"`
 }
 
 func DefaultBaseURL() string {
@@ -83,7 +99,7 @@ func Load() (*Session, string, bool, error) {
 }
 
 func Save(session Session) (string, error) {
-	if strings.TrimSpace(session.Authorization) == "" && strings.TrimSpace(session.Cookie) == "" {
+	if strings.TrimSpace(session.Authorization) == "" && strings.TrimSpace(session.Cookie) == "" && len(session.Cookies) == 0 {
 		return "", fmt.Errorf("captured Garmin session did not include an Authorization header or cookies")
 	}
 	if session.BaseURL == "" {
@@ -173,5 +189,8 @@ func (s *Session) Active(now time.Time) bool {
 	if s.Expired(now) {
 		return false
 	}
-	return s.Authorization != "" || s.Cookie != ""
+	if s.Authorization != "" {
+		return true
+	}
+	return !s.VerifiedAt.IsZero() && (s.Cookie != "" || len(s.Cookies) > 0)
 }

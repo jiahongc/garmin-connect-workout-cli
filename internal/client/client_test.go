@@ -4,9 +4,15 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"garmin-connect-workout-cli/internal/config"
 )
 
 func TestTruncateBody(t *testing.T) {
@@ -67,5 +73,24 @@ func TestTruncateBody_UTF8RuneAtBoundary(t *testing.T) {
 	// Partial rune must be dropped, not replaced: 4094 valid bytes + "...".
 	if want := 4094 + 3; len(got) != want {
 		t.Fatalf("len = %d, want %d (partial rune should be dropped, not replaced)", len(got), want)
+	}
+}
+
+func TestMutatingRequestDoesNotRetry429(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "0")
+		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	c := New(&config.Config{BaseURL: server.URL, AuthHeaderVal: "Bearer test"}, time.Second, 100)
+	_, status, err := c.Post(context.Background(), "/workout-service/workout", map[string]any{"name": "test"})
+	if err == nil || status != http.StatusTooManyRequests {
+		t.Fatalf("Post() status = %d, error = %v", status, err)
+	}
+	if calls != 1 {
+		t.Fatalf("POST calls = %d, want 1", calls)
 	}
 }

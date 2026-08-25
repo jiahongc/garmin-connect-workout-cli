@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -112,6 +113,50 @@ func TestGarminMutationSessionOpensCircuitOn429(t *testing.T) {
 	}
 	if evaluateCalls != firstCallCount || rateLimitCalls != 1 {
 		t.Fatalf("evaluateCalls = %d, rateLimitCalls = %d", evaluateCalls, rateLimitCalls)
+	}
+}
+
+func TestGarminMutationSessionSingleApplyFallsBackAfter427(t *testing.T) {
+	var calls []string
+	session := testGarminMutationSession(func(_ context.Context, base, method, _ string, _ any) (browserPostResponse, error) {
+		calls = append(calls, fmt.Sprintf("%s %s", method, base))
+		if method == "GET" {
+			// All discovery/list calls return an empty library: the failed
+			// POST on base "a" created nothing, so the verifier reports
+			// not-found and the session must fall through to base "b".
+			return browserPostResponse{BaseURL: base, Status: 200, Body: `[]`}, nil
+		}
+		if base == "a" {
+			return browserPostResponse{BaseURL: base, Status: 427, Body: `{"error":{"status-code":"427"}}`}, nil
+		}
+		return browserPostResponse{BaseURL: base, Status: 200, Body: `{"workoutId":"42"}`}, nil
+	})
+	response, err := session.mutate("POST", "/workout-service/workout", map[string]any{"workoutName": "Tue 8/25: 6mi E + strides"}, func() (browserPostResponse, bool, error) {
+		current, err := listGarminWorkoutsWithMutationSession(session, defaultGarminBatchListLimit)
+		if err != nil {
+			return browserPostResponse{}, false, err
+		}
+		matches := exactGarminWorkoutNameMatches(current, "Tue 8/25: 6mi E + strides")
+		if len(matches) != 1 {
+			return browserPostResponse{}, false, nil
+		}
+		bodyBytes, _ := json.Marshal(map[string]string{"workoutId": matches[0].WorkoutId})
+		return browserPostResponse{BaseURL: "verified-live-state", Status: 200, Body: string(bodyBytes)}, true, nil
+	})
+	if err != nil {
+		t.Fatalf("mutate() error = %v", err)
+	}
+	if response.Status != 200 {
+		t.Fatalf("status = %d, want 200 after fallback", response.Status)
+	}
+	var posts []string
+	for _, c := range calls {
+		if len(c) >= 4 && c[:4] == "POST" {
+			posts = append(posts, c)
+		}
+	}
+	if len(posts) != 2 || posts[0] != "POST a" || posts[1] != "POST b" {
+		t.Fatalf("POST attempts = %#v, want [POST a POST b]", posts)
 	}
 }
 

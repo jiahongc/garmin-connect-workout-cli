@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -39,7 +38,7 @@ func newWorkoutsApplyBatchCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "apply-batch <draft-id> [draft-id...]",
 		Short: "Upload and schedule multiple drafts in one guarded browser session",
-		Long: `Uploads or replaces multiple saved drafts through one visible signed-in browser session.
+		Long: `Uploads or replaces multiple saved drafts through one headless verified browser session.
 
 The command discovers a working Garmin backend with a read-only request before
 the first mutation, checkpoints each successful upload before scheduling it,
@@ -79,18 +78,24 @@ on HTTP 429.`,
 				return err
 			}
 
-			profileDir, err := garminsession.BrowserProfileDir()
+			profileDir, profileReady, err := garminsession.BrowserProfileReady()
 			if err != nil {
 				return configErr(err)
 			}
-			if err := os.MkdirAll(profileDir, 0o700); err != nil {
-				return configErr(fmt.Errorf("creating browser profile dir: %w", err))
+			if !profileReady {
+				return authErr(fmt.Errorf("Garmin browser profile is not ready; run auth login-browser first"))
+			}
+			webSession, _, found, err := garminsession.Load()
+			if err != nil {
+				return configErr(err)
+			}
+			if !found || !webSession.Active(time.Now()) {
+				return authErr(fmt.Errorf("Garmin web session is not verified; run auth login-browser once"))
 			}
 
 			results := make([]map[string]any, 0, len(items))
-			fmt.Fprintln(cmd.ErrOrStderr(), "Opening one visible Garmin browser session for the complete workout batch.")
-			fmt.Fprintln(cmd.ErrOrStderr(), "If Garmin asks, sign in and complete MFA in that browser window.")
-			_, err = verifyGarminBrowserProfileWithAction(cmd.Context(), profileDir, loginTimeout, func(browserCtx context.Context) error {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Reusing the verified Garmin session headlessly for the complete workout batch.")
+			err = runGarminBrowserWithSession(cmd.Context(), profileDir, *webSession, true, loginTimeout, func(browserCtx context.Context) error {
 				session := newGarminBrowserMutationSession(browserCtx)
 				if err := session.discoverBase(); err != nil {
 					return err
@@ -148,7 +153,7 @@ on HTTP 429.`,
 	cmd.Flags().BoolVar(&apply, "apply", false, "Actually upload and schedule every draft")
 	cmd.Flags().BoolVar(&noSchedule, "no-schedule", false, "Upload every workout without adding it to the calendar")
 	cmd.Flags().BoolVar(&replaceUploaded, "replace-uploaded", false, "Update each draft's checkpointed Garmin workout in place and verify the live payload")
-	cmd.Flags().DurationVar(&loginTimeout, "login-timeout", defaultGarminBatchLoginTimeout, "Maximum time for login and batch application")
+	cmd.Flags().DurationVar(&loginTimeout, "login-timeout", defaultGarminBatchLoginTimeout, "Maximum time for the headless batch application")
 	cmd.Flags().DurationVar(&mutationDelay, "mutation-delay", defaultGarminBatchMutationDelay, "Minimum spacing between Garmin mutations")
 	return cmd
 }
@@ -208,6 +213,7 @@ func applyWorkoutBatchItem(
 ) (map[string]any, []types.Workout, error) {
 	workoutID := item.Draft.UploadedWorkout
 	uploadStatus := "created"
+	uploadHTTPStatus := 200
 	if workoutID != "" {
 		if !containsGarminWorkoutID(liveWorkouts, workoutID) {
 			return nil, liveWorkouts, fmt.Errorf("local draft points to Garmin workout %s, but it is absent from the live library", workoutID)
@@ -222,6 +228,7 @@ func applyWorkoutBatchItem(
 			if err != nil {
 				return nil, liveWorkouts, err
 			}
+			uploadHTTPStatus = response.Status
 			_, matches, mismatch, err := verifyGarminWorkoutPayloadWithMutationSession(session, workoutID, item.Draft.GarminPayload)
 			if err != nil {
 				return nil, liveWorkouts, err
@@ -250,9 +257,16 @@ func applyWorkoutBatchItem(
 				)
 			}
 			workoutID = matches[0].WorkoutId
+			_, payloadMatches, mismatch, err := verifyGarminWorkoutPayloadWithMutationSession(session, workoutID, item.Draft.GarminPayload)
+			if err != nil {
+				return nil, liveWorkouts, err
+			}
+			if !payloadMatches {
+				return nil, liveWorkouts, fmt.Errorf("workout name %q already exists with a different payload: %s", item.Draft.Name, mismatch)
+			}
 			uploadStatus = "existing"
 		} else {
-			response, err := mutate("POST", "/workout-service/workout", item.Draft.GarminPayload, func() (browserPostResponse, bool, error) {
+			verify := func() (browserPostResponse, bool, error) {
 				current, err := listGarminWorkoutsWithMutationSession(session, defaultGarminBatchListLimit)
 				if err != nil {
 					return browserPostResponse{}, false, err
@@ -264,18 +278,42 @@ func applyWorkoutBatchItem(
 				if len(matches) == 0 {
 					return browserPostResponse{}, false, nil
 				}
+				_, payloadMatches, mismatch, err := verifyGarminWorkoutPayloadWithMutationSession(session, matches[0].WorkoutId, item.Draft.GarminPayload)
+				if err != nil {
+					return browserPostResponse{}, false, err
+				}
+				if !payloadMatches {
+					return browserPostResponse{}, false, fmt.Errorf("workout name %q appeared with a different payload after HTTP 427: %s", item.Draft.Name, mismatch)
+				}
 				body, _ := json.Marshal(map[string]string{"workoutId": matches[0].WorkoutId})
 				return browserPostResponse{BaseURL: "verified-live-state", Status: 200, Body: string(body)}, true, nil
-			})
+			}
+			response, err := mutate("POST", "/workout-service/workout", item.Draft.GarminPayload, verify)
 			if err != nil {
 				return nil, liveWorkouts, err
 			}
+			uploadHTTPStatus = response.Status
 			workoutID = extractResponseID([]byte(response.Body), "workoutId", "workout_id", "id")
 			if workoutID == "" {
-				return nil, liveWorkouts, fmt.Errorf("Garmin upload returned HTTP %d without workoutId", response.Status)
+				verified, found, err := verify()
+				if err != nil {
+					return nil, liveWorkouts, err
+				}
+				if !found {
+					return nil, liveWorkouts, fmt.Errorf("Garmin upload returned HTTP %d without workoutId and live verification found no matching workout", response.Status)
+				}
+				response = verified
+				workoutID = extractResponseID([]byte(response.Body), "workoutId")
 			}
 			if response.BaseURL == "verified-live-state" {
 				uploadStatus = "recovered"
+			}
+			_, payloadMatches, mismatch, err := verifyGarminWorkoutPayloadWithMutationSession(session, workoutID, item.Draft.GarminPayload)
+			if err != nil {
+				return nil, liveWorkouts, err
+			}
+			if !payloadMatches {
+				return nil, liveWorkouts, fmt.Errorf("Garmin accepted workout %s, but live verification failed: %s", workoutID, mismatch)
 			}
 			liveWorkouts = append(liveWorkouts, types.Workout{WorkoutId: workoutID, WorkoutName: item.Draft.Name})
 		}
@@ -285,10 +323,11 @@ func applyWorkoutBatchItem(
 	}
 
 	result := map[string]any{
-		"draft_id":      item.Draft.ID,
-		"name":          item.Draft.Name,
-		"workout_id":    workoutID,
-		"upload_status": uploadStatus,
+		"draft_id":           item.Draft.ID,
+		"name":               item.Draft.Name,
+		"workout_id":         workoutID,
+		"upload_status":      uploadStatus,
+		"upload_http_status": uploadHTTPStatus,
 	}
 	if item.Schedule == "" {
 		return result, liveWorkouts, nil
@@ -303,6 +342,7 @@ func applyWorkoutBatchItem(
 		return nil, liveWorkouts, err
 	}
 	scheduleStatus := "existing"
+	scheduleHTTPStatus := 200
 	if !found {
 		path := "/workout-service/schedule/" + workoutID
 		response, err := mutate("POST", path, map[string]string{"date": item.Schedule}, func() (browserPostResponse, bool, error) {
@@ -316,6 +356,7 @@ func applyWorkoutBatchItem(
 		if err != nil {
 			return nil, liveWorkouts, err
 		}
+		scheduleHTTPStatus = response.Status
 		scheduleID = extractResponseID([]byte(response.Body), "workoutScheduleId", "scheduledWorkoutId", "id")
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
@@ -344,6 +385,7 @@ func applyWorkoutBatchItem(
 		return nil, liveWorkouts, fmt.Errorf("checkpointing scheduled workout: %w", err)
 	}
 	result["schedule_status"] = scheduleStatus
+	result["schedule_http_status"] = scheduleHTTPStatus
 	result["scheduled_date"] = item.Schedule
 	result["scheduled_workout_id"] = scheduleID
 	return result, liveWorkouts, nil

@@ -3,11 +3,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"garmin-connect-workout-cli/internal/config"
+	"garmin-connect-workout-cli/internal/garminsession"
 	"garmin-connect-workout-cli/internal/workoutdraft"
 	"github.com/spf13/cobra"
 )
@@ -62,45 +65,11 @@ func newNovelWorkoutsApplyCmd(flags *rootFlags) *cobra.Command {
 				preview["next"] = "rerun with --apply to upload this workout to Garmin Connect"
 				return printJSONOrHuman(cmd, flags, preview, fmt.Sprintf("Dry run only. Rerun with --apply to upload draft %s.\n", draft.ID))
 			}
-			data, statusCode, err := mutateGarminWorkout(cmd, flags, method, path, draft.GarminPayload)
+			result, err := applyGarminWorkoutDraft(cmd, flags, store, draft, method, path, flagSchedule, flagReplace)
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}
-			workoutID := extractResponseID(data, "workoutId", "workout_id", "id")
-			if workoutID == "" && flagReplace != "" {
-				workoutID = flagReplace
-			}
-			if workoutID == "" {
-				return apiErr(fmt.Errorf("Garmin upload returned HTTP %d without workoutId: %s", statusCode, strings.TrimSpace(string(data))))
-			}
-			result := map[string]any{
-				"draft_id":   draft.ID,
-				"workout_id": workoutID,
-				"status":     statusCode,
-			}
-			if flagReplace == "" {
-				result["uploaded"] = true
-			} else {
-				result["updated"] = true
-			}
-			scheduledID := ""
-			if flagSchedule != "" {
-				scheduleBody := map[string]string{"date": flagSchedule}
-				scheduleData, scheduleStatus, err := postGarminWorkout(cmd, flags, "/workout-service/schedule/"+workoutID, scheduleBody)
-				if err != nil {
-					return classifyAPIError(err, flags)
-				}
-				scheduledID = extractResponseID(scheduleData, "workoutScheduleId", "scheduledWorkoutId", "id")
-				result["scheduled"] = true
-				result["schedule_status"] = scheduleStatus
-				result["scheduled_workout_id"] = scheduledID
-				result["scheduled_date"] = flagSchedule
-				result["schedule_response"] = json.RawMessage(scheduleData)
-			}
-			if err := store.MarkApplied(draft.ID, workoutID, scheduledID, flagSchedule); err != nil {
-				return configErr(fmt.Errorf("updating local history: %w", err))
-			}
-			return printJSONOrHuman(cmd, flags, result, fmt.Sprintf("Uploaded workout %s\n", workoutID))
+			return printJSONOrHuman(cmd, flags, result, fmt.Sprintf("Uploaded workout %v\n", result["workout_id"]))
 		},
 	}
 	cmd.Flags().StringVar(&flagSchedule, "schedule", "", "Schedule date in YYYY-MM-DD format; defaults to the draft date")
@@ -108,6 +77,184 @@ func newNovelWorkoutsApplyCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&flagApply, "apply", false, "Actually write the workout to Garmin Connect")
 	cmd.Flags().StringVar(&flagReplace, "replace", "", "Update an existing Garmin workout ID in place")
 	return cmd
+}
+
+func applyGarminWorkoutDraft(
+	cmd *cobra.Command,
+	flags *rootFlags,
+	store workoutdraft.Store,
+	draft workoutdraft.Draft,
+	method, path, scheduleDate, replaceID string,
+) (map[string]any, error) {
+	c, err := flags.newClient()
+	if err != nil {
+		return nil, err
+	}
+	if useGarminBrowserMutationSession(c.Config) {
+		return applyGarminWorkoutDraftWithBrowser(cmd, flags, store, draft, scheduleDate, replaceID)
+	}
+
+	var data []byte
+	var statusCode int
+	if method == "PUT" {
+		data, statusCode, err = c.Put(cmd.Context(), path, draft.GarminPayload)
+	} else {
+		data, statusCode, err = c.Post(cmd.Context(), path, draft.GarminPayload)
+	}
+	if err != nil {
+		return nil, err
+	}
+	workoutID := extractResponseID(data, "workoutId", "workout_id", "id")
+	if workoutID == "" {
+		workoutID = replaceID
+	}
+	if workoutID == "" {
+		return nil, apiErr(fmt.Errorf("Garmin upload returned HTTP %d without workoutId: %s", statusCode, strings.TrimSpace(string(data))))
+	}
+	result := workoutApplyResult(draft.ID, workoutID, statusCode, replaceID)
+	if err := store.MarkApplied(draft.ID, workoutID, "", ""); err != nil {
+		return nil, configErr(fmt.Errorf("checkpointing uploaded workout: %w", err))
+	}
+	scheduledID := ""
+	if scheduleDate != "" {
+		scheduleData, scheduleStatus, err := c.Post(cmd.Context(), "/workout-service/schedule/"+workoutID, map[string]string{"date": scheduleDate})
+		if err != nil {
+			return nil, err
+		}
+		scheduledID = extractResponseID(scheduleData, "workoutScheduleId", "scheduledWorkoutId", "id")
+		addWorkoutScheduleResult(result, scheduleDate, scheduledID, scheduleStatus, scheduleData)
+	}
+	if scheduleDate != "" {
+		if err := store.MarkApplied(draft.ID, workoutID, scheduledID, scheduleDate); err != nil {
+			return nil, configErr(fmt.Errorf("checkpointing scheduled workout: %w", err))
+		}
+	}
+	return result, nil
+}
+
+func workoutApplyResult(draftID, workoutID string, statusCode int, replaceID string) map[string]any {
+	result := map[string]any{"draft_id": draftID, "workout_id": workoutID, "status": statusCode}
+	if replaceID == "" {
+		result["uploaded"] = true
+	} else {
+		result["updated"] = true
+	}
+	return result
+}
+
+func addWorkoutScheduleResult(result map[string]any, date, scheduledID string, statusCode int, data []byte) {
+	result["scheduled"] = true
+	result["schedule_status"] = statusCode
+	result["scheduled_workout_id"] = scheduledID
+	result["scheduled_date"] = date
+	result["schedule_response"] = json.RawMessage(data)
+}
+
+func applyGarminWorkoutDraftWithBrowser(
+	cmd *cobra.Command,
+	flags *rootFlags,
+	store workoutdraft.Store,
+	draft workoutdraft.Draft,
+	scheduleDate, replaceID string,
+) (map[string]any, error) {
+	if err := checkGarminMutationCircuit(time.Now()); err != nil {
+		return nil, err
+	}
+	profileDir, profileReady, err := garminsession.BrowserProfileReady()
+	if err != nil {
+		return nil, configErr(err)
+	}
+	if !profileReady {
+		return nil, authErr(fmt.Errorf("Garmin browser profile is not ready; run auth login-browser first"))
+	}
+	webSession, _, found, err := garminsession.Load()
+	if err != nil {
+		return nil, configErr(err)
+	}
+	if !found || !webSession.Active(time.Now()) {
+		return nil, authErr(fmt.Errorf("Garmin web session is not verified; run auth login-browser once"))
+	}
+
+	fmt.Fprintln(cmd.ErrOrStderr(), "Reusing the verified Garmin session headlessly for upload and scheduling.")
+	var result map[string]any
+	err = runGarminSingleApplyBrowser(cmd.Context(), profileDir, *webSession, func(browserCtx context.Context) error {
+		session := newGarminBrowserMutationSession(browserCtx)
+		if err := session.discoverBase(); err != nil {
+			return err
+		}
+		var applyErr error
+		result, applyErr = applyGarminWorkoutDraftWithMutationSession(
+			browserCtx,
+			store,
+			draft,
+			scheduleDate,
+			replaceID,
+			session,
+			defaultGarminBatchMutationDelay,
+		)
+		return applyErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func applyGarminWorkoutDraftWithMutationSession(
+	ctx context.Context,
+	store workoutdraft.Store,
+	draft workoutdraft.Draft,
+	scheduleDate, replaceID string,
+	session *garminBrowserMutationSession,
+	mutationDelay time.Duration,
+) (map[string]any, error) {
+	lastMutation := time.Time{}
+	mutate := garminBatchMutateFunc(func(method, path string, body any, verify garminMutationVerifier) (browserPostResponse, error) {
+		if !lastMutation.IsZero() {
+			if err := waitForGarminMutationSpacing(ctx, time.Until(lastMutation.Add(mutationDelay))); err != nil {
+				return browserPostResponse{}, err
+			}
+		}
+		response, err := session.mutate(method, path, body, verify)
+		lastMutation = time.Now()
+		return response, err
+	})
+
+	itemDraft := draft
+	if replaceID != "" {
+		itemDraft.UploadedWorkout = replaceID
+	}
+	liveWorkouts, err := listGarminWorkoutsWithMutationSession(session, defaultGarminBatchListLimit)
+	if err != nil {
+		return nil, err
+	}
+	itemFlags := rootFlags{}
+	itemFlags.idempotent = true
+	batchResult, _, err := applyWorkoutBatchItem(
+		ctx,
+		&itemFlags,
+		store,
+		session,
+		mutate,
+		workoutApplyBatchItem{Draft: itemDraft, Schedule: scheduleDate},
+		liveWorkouts,
+		replaceID != "",
+	)
+	if err != nil {
+		return nil, err
+	}
+	workoutID, _ := batchResult["workout_id"].(string)
+	uploadHTTPStatus, _ := batchResult["upload_http_status"].(int)
+	result := workoutApplyResult(draft.ID, workoutID, uploadHTTPStatus, replaceID)
+	result["upload_status"] = batchResult["upload_status"]
+	if scheduleDate != "" {
+		scheduledID, _ := batchResult["scheduled_workout_id"].(string)
+		scheduleHTTPStatus, _ := batchResult["schedule_http_status"].(int)
+		body, _ := json.Marshal(map[string]string{"workoutScheduleId": scheduledID})
+		addWorkoutScheduleResult(result, scheduleDate, scheduledID, scheduleHTTPStatus, body)
+		result["schedule_disposition"] = batchResult["schedule_status"]
+	}
+	return result, nil
 }
 
 func garminWorkoutWriteTarget(replaceID string) (string, string) {
@@ -139,8 +286,8 @@ func mutateGarminWorkout(cmd *cobra.Command, flags *rootFlags, method, path stri
 	if err != nil {
 		return nil, 0, err
 	}
-	if !hasGarminWriteAuth(c.Config) {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Using signed-in Garmin browser profile for this write.")
+	if useGarminBrowserMutationSession(c.Config) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Using the verified Garmin browser session headlessly for this write.")
 		if method == "PUT" {
 			return garminBrowserPutJSON(cmd.Context(), path, body)
 		}
@@ -150,6 +297,17 @@ func mutateGarminWorkout(cmd *cobra.Command, flags *rootFlags, method, path stri
 		return c.Put(cmd.Context(), path, body)
 	}
 	return c.Post(cmd.Context(), path, body)
+}
+
+func useGarminBrowserMutationSession(cfg *config.Config) bool {
+	return cfg == nil || cfg.AuthSource == "garmin-web-session" || !hasGarminWriteAuth(cfg)
+}
+
+func runGarminSingleApplyBrowser(parent context.Context, profileDir string, webSession garminsession.Session, action func(context.Context) error) error {
+	if err := runGarminBrowserWithSession(parent, profileDir, webSession, true, 90*time.Second, action); err != nil {
+		return fmt.Errorf("running Garmin write through the saved browser profile: %w", err)
+	}
+	return nil
 }
 
 func hasGarminWriteAuth(cfg *config.Config) bool {

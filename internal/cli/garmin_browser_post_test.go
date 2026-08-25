@@ -46,6 +46,7 @@ func TestGarminLoginSessionCheckOnlyRunsFromConnectApp(t *testing.T) {
 		{"", false},
 		{"https://sso.garmin.com/portal/sso/en-US/sign-in", false},
 		{"https://connect.garmin.com/app/workouts", true},
+		{"https://connect.garmin.com/modern/workouts", true},
 	} {
 		if got := isGarminConnectAppLocation(tt.location); got != tt.want {
 			t.Fatalf("isGarminConnectAppLocation(%q) = %v, want %v", tt.location, got, tt.want)

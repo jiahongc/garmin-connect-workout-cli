@@ -243,9 +243,14 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 	ticker := time.NewTicker(750 * time.Millisecond)
 	defer ticker.Stop()
 	lastLocation := ""
+	nextProbe := time.Time{}
+	var lastProbeErr error
 	for {
 		select {
 		case <-ctx.Done():
+			if lastProbeErr != nil {
+				return garminsession.Session{}, fmt.Errorf("timed out waiting for an authenticated Garmin workout session: %w", lastProbeErr)
+			}
 			return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; sign in and complete MFA in the browser")
 		case <-ticker.C:
 			location, err := browserLocation(ctx)
@@ -265,21 +270,46 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 				}
 				return garminsession.Session{}, err
 			}
-			if ok && session.Active(time.Now()) {
-				if action != nil {
-					if err := chromedp.Run(ctx, chromedp.ActionFunc(action)); err != nil {
-						return garminsession.Session{}, err
-					}
-				}
-				return session, nil
+			if !ok || !sessionCandidateActive(session) || time.Now().Before(nextProbe) {
+				continue
 			}
+			nextProbe = time.Now().Add(10 * time.Second)
+			probeErr := chromedp.Run(ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+				return newGarminBrowserMutationSession(actionCtx).discoverBase()
+			}))
+			if probeErr != nil {
+				if ExitCode(probeErr) == 7 {
+					return garminsession.Session{}, probeErr
+				}
+				lastProbeErr = probeErr
+				continue
+			}
+			refreshed, ok, err := currentCapturedSession(ctx, capture)
+			if err != nil {
+				return garminsession.Session{}, err
+			}
+			if ok && sessionCandidateActive(refreshed) {
+				session = refreshed
+			}
+			session.VerifiedAt = time.Now()
+			if action != nil {
+				if err := chromedp.Run(ctx, chromedp.ActionFunc(action)); err != nil {
+					return garminsession.Session{}, err
+				}
+			}
+			return session, nil
 		}
 	}
 }
 
+func sessionCandidateActive(session garminsession.Session) bool {
+	return session.Authorization != "" || session.Cookie != "" || len(session.Cookies) > 0
+}
+
 func isGarminConnectAppLocation(location string) bool {
 	parsed, err := url.Parse(location)
-	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com" && strings.HasPrefix(parsed.Path, "/app/")
+	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com" &&
+		(strings.HasPrefix(parsed.Path, "/app/") || strings.HasPrefix(parsed.Path, "/modern/"))
 }
 
 type webSessionCapture struct {
@@ -455,21 +485,25 @@ func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (ga
 		return garminsession.Session{}, false, fmt.Errorf("reading Garmin cookies from the browser: %w", err)
 	}
 	cookie := cookieHeader(cookies)
+	savedCookies := garminSessionCookies(cookies)
 	if cookie == "" {
 		cookie = capturedCookie
 	}
-	if auth == "" && cookie == "" {
+	if auth == "" {
 		storageAuth, err := browserStorageAuthorization(ctx)
 		if err != nil {
 			if isTransientChromeContextError(err) {
-				return garminsession.Session{}, false, nil
+				if cookie == "" {
+					return garminsession.Session{}, false, nil
+				}
+			} else {
+				return garminsession.Session{}, false, err
 			}
-			return garminsession.Session{}, false, err
-		}
-		if storageAuth == "" {
+		} else if storageAuth != "" {
+			auth = storageAuth
+		} else if cookie == "" {
 			return garminsession.Session{}, false, nil
 		}
-		auth = storageAuth
 	}
 	if auth == "" && cookie == "" {
 		ok, err := browserViewerAuthenticated(ctx)
@@ -494,10 +528,36 @@ func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (ga
 	return garminsession.Session{
 		Authorization: auth,
 		Cookie:        cookie,
+		Cookies:       savedCookies,
 		UserAgent:     ua,
 		BaseURL:       garminsession.DefaultBaseURL(),
 		CapturedAt:    time.Now(),
 	}, true, nil
+}
+
+func garminSessionCookies(cookies []*network.Cookie) []garminsession.Cookie {
+	saved := make([]garminsession.Cookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie == nil {
+			continue
+		}
+		domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cookie.Domain)), ".")
+		if cookie.Name == "" || cookie.Value == "" || (domain != "garmin.com" && !strings.HasSuffix(domain, ".garmin.com")) {
+			continue
+		}
+		saved = append(saved, garminsession.Cookie{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			Domain:   cookie.Domain,
+			Path:     cookie.Path,
+			Expires:  cookie.Expires,
+			HTTPOnly: cookie.HTTPOnly,
+			Secure:   cookie.Secure,
+			Session:  cookie.Session,
+			SameSite: string(cookie.SameSite),
+		})
+	}
+	return saved
 }
 
 func browserStorageAuthorization(ctx context.Context) (string, error) {
@@ -678,7 +738,7 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 
 			w := cmd.OutOrStdout()
 			header := cfg.AuthHeader()
-			authed := header != "" || (webSessionFound && webSession.Active(time.Now())) || browserProfileReady
+			authed := header != "" || (webSessionFound && webSession.Active(time.Now()))
 			// JSON envelope: {authenticated, verified, source, config}. When not
 			// authenticated, write the envelope first then return authErr
 			// so exit code carries the auth-failure signal.

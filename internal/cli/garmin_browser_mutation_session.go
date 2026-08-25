@@ -13,8 +13,8 @@ const garminBrowserMutationProbePath = "/workout-service/workouts?start=0&limit=
 const defaultGarminBrowserRequestDelay = 2 * time.Second
 
 var garminBrowserMutationBases = []string{
-	"https://connectapi.garmin.com",
 	"/gc-api",
+	"https://connectapi.garmin.com",
 	"https://connect.garmin.com/proxy",
 	"https://connect.garmin.com/modern/proxy",
 }

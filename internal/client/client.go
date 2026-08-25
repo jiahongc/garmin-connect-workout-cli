@@ -505,7 +505,13 @@ func (c *Client) doInternal(ctx context.Context, method, path string, params map
 		return c.dryRun(method, targetURL, path, params, bodyBytes, headerOverrides, authHeader)
 	}
 
-	const maxRetries = 3
+	maxRetries := 3
+	if !readOnlyIntent && isMutatingVerb(method) {
+		// A timed-out or rejected write may still have reached the server. Retry
+		// only read-only operations; mutation callers must verify remote state
+		// before making a controlled retry.
+		maxRetries = 0
+	}
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {

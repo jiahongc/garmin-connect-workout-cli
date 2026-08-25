@@ -40,6 +40,7 @@ func TestApplyWorkoutBatchItemCheckpointsUploadAndVerifiedSchedule(t *testing.T)
 	store := workoutdraft.Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
 	draft := mustSaveBatchDraft(t, store, "Workout A", "2026-07-28")
 	item := workoutApplyBatchItem{Draft: draft, Schedule: draft.Date}
+	livePayload, _ := json.Marshal(draft.GarminPayload)
 
 	calendarReads := 0
 	session := testGarminMutationSession(func(_ context.Context, base, method, path string, _ any) (browserPostResponse, error) {
@@ -48,6 +49,9 @@ func TestApplyWorkoutBatchItemCheckpointsUploadAndVerifiedSchedule(t *testing.T)
 		}
 		if path == garminBrowserMutationProbePath {
 			return browserPostResponse{BaseURL: base, Status: 200, Body: `[]`}, nil
+		}
+		if path == "/workout-service/workout/42" {
+			return browserPostResponse{BaseURL: base, Status: 200, Body: string(livePayload)}, nil
 		}
 		calendarReads++
 		if calendarReads == 1 {
@@ -101,6 +105,7 @@ func TestApplyWorkoutBatchItemRecovers427WithoutDuplicateUpload(t *testing.T) {
 	store := workoutdraft.Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
 	draft := mustSaveBatchDraft(t, store, "Workout A", "2026-07-28")
 	item := workoutApplyBatchItem{Draft: draft}
+	livePayload, _ := json.Marshal(draft.GarminPayload)
 
 	postCalls := 0
 	session := testGarminMutationSession(func(_ context.Context, base, method, path string, _ any) (browserPostResponse, error) {
@@ -110,6 +115,9 @@ func TestApplyWorkoutBatchItemRecovers427WithoutDuplicateUpload(t *testing.T) {
 		}
 		if path == garminBrowserMutationProbePath {
 			return browserPostResponse{BaseURL: base, Status: 200, Body: `[]`}, nil
+		}
+		if path == "/workout-service/workout/42" {
+			return browserPostResponse{BaseURL: base, Status: 200, Body: string(livePayload)}, nil
 		}
 		return browserPostResponse{
 			BaseURL: base,
@@ -144,9 +152,11 @@ func TestApplyWorkoutBatchItemRetries427OnlyAfterVerifiedAbsence(t *testing.T) {
 	store := workoutdraft.Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
 	draft := mustSaveBatchDraft(t, store, "Workout A", "2026-07-28")
 	item := workoutApplyBatchItem{Draft: draft}
+	livePayload, _ := json.Marshal(draft.GarminPayload)
 
 	var postBases []string
 	absenceVerified := false
+	created := false
 	session := testGarminMutationSession(func(_ context.Context, base, method, path string, _ any) (browserPostResponse, error) {
 		if method == "POST" {
 			postBases = append(postBases, base)
@@ -156,10 +166,14 @@ func TestApplyWorkoutBatchItemRetries427OnlyAfterVerifiedAbsence(t *testing.T) {
 			if !absenceVerified {
 				return browserPostResponse{}, fmt.Errorf("second POST happened before absence verification")
 			}
+			created = true
 			return browserPostResponse{BaseURL: base, Status: 200, Body: `{"workoutId":42}`}, nil
 		}
 		if path == garminBrowserMutationProbePath {
 			return browserPostResponse{BaseURL: base, Status: 200, Body: `[]`}, nil
+		}
+		if path == "/workout-service/workout/42" && created {
+			return browserPostResponse{BaseURL: base, Status: 200, Body: string(livePayload)}, nil
 		}
 		absenceVerified = true
 		return browserPostResponse{BaseURL: base, Status: 200, Body: `[]`}, nil

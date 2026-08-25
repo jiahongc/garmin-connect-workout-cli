@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"garmin-connect-workout-cli/internal/garminsession"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
@@ -58,9 +61,6 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 			return nil, 0, err
 		}
 	}
-	garminBrowserMu.Lock()
-	defer garminBrowserMu.Unlock()
-
 	profileDir, err := garminsession.BrowserProfileDir()
 	if err != nil {
 		return nil, 0, err
@@ -68,31 +68,20 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 	if _, err := os.Stat(filepath.Join(profileDir, "Default", "Cookies")); err != nil {
 		return nil, 0, fmt.Errorf("Garmin browser profile is not ready; run auth login-browser first")
 	}
-	opts := []chromedp.ExecAllocatorOption{
-		chromedp.NoFirstRun,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.Flag("headless", headless),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.UserDataDir(profileDir),
-		chromedp.WindowSize(1280, 900),
+	webSession, _, found, err := garminsession.Load()
+	if err != nil {
+		return nil, 0, err
 	}
-	opts = append(opts, garminBrowserExecOptions()...)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
-	defer allocCancel()
-	browserCtx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	browserCtx, timeoutCancel := context.WithTimeout(browserCtx, 90*time.Second)
-	defer timeoutCancel()
+	if !found || !webSession.Active(time.Now()) {
+		return nil, 0, authErr(fmt.Errorf("Garmin web session is not verified; run auth login-browser once"))
+	}
 
 	var parsed browserPostResponse
-	err = chromedp.Run(browserCtx,
-		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			response, err := garminBrowserRequestFromPage(ctx, method, path, body)
-			parsed = response
-			return err
-		}),
-	)
+	err = runGarminBrowserWithSession(ctx, profileDir, *webSession, headless, 90*time.Second, func(ctx context.Context) error {
+		response, err := garminBrowserRequestFromPage(ctx, method, path, body)
+		parsed = response
+		return err
+	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("posting through Garmin browser session: %w", err)
 	}
@@ -111,6 +100,84 @@ func garminBrowserRequestJSONWithHeadless(ctx context.Context, method string, pa
 		_ = clearGarminMutationCircuit()
 	}
 	return []byte(parsed.Body), parsed.Status, nil
+}
+
+func runGarminBrowserWithSession(
+	parent context.Context,
+	profileDir string,
+	webSession garminsession.Session,
+	headless bool,
+	timeout time.Duration,
+	action func(context.Context) error,
+) error {
+	garminBrowserMu.Lock()
+	defer garminBrowserMu.Unlock()
+	opts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("headless", headless),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.UserDataDir(profileDir),
+		chromedp.WindowSize(1280, 900),
+	}
+	opts = append(opts, garminBrowserExecOptions()...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
+	defer allocCancel()
+	browserCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+	browserCtx, timeoutCancel := context.WithTimeout(browserCtx, timeout)
+	defer timeoutCancel()
+
+	actions := []chromedp.Action{network.Enable()}
+	if cookies := garminSavedSessionCookieParams(webSession); len(cookies) > 0 {
+		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetCookies(cookies).Do(ctx)
+		}))
+	}
+	var location string
+	actions = append(actions, chromedp.Navigate("https://connect.garmin.com/app/workouts"), chromedp.Location(&location))
+	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+		if !isGarminConnectLocation(location) {
+			return authErr(fmt.Errorf("saved Garmin session redirected to %s; run auth login-browser once", location))
+		}
+		return action(ctx)
+	}))
+	return chromedp.Run(browserCtx, actions...)
+}
+
+func isGarminConnectLocation(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com"
+}
+
+func garminSavedSessionCookieParams(session garminsession.Session) []*network.CookieParam {
+	params := make([]*network.CookieParam, 0, len(session.Cookies))
+	for _, cookie := range session.Cookies {
+		domain := strings.ToLower(strings.TrimSpace(cookie.Domain))
+		bareDomain := strings.TrimPrefix(domain, ".")
+		if cookie.Name == "" || cookie.Value == "" || (bareDomain != "garmin.com" && !strings.HasSuffix(bareDomain, ".garmin.com")) {
+			continue
+		}
+		path := cookie.Path
+		if path == "" {
+			path = "/"
+		}
+		param := &network.CookieParam{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			Domain:   cookie.Domain,
+			Path:     path,
+			Secure:   cookie.Secure,
+			HTTPOnly: cookie.HTTPOnly,
+			SameSite: network.CookieSameSite(cookie.SameSite),
+		}
+		if !cookie.Session && cookie.Expires > 0 {
+			expires := cdp.TimeSinceEpoch(time.Unix(int64(cookie.Expires), 0))
+			param.Expires = &expires
+		}
+		params = append(params, param)
+	}
+	return params
 }
 
 func garminBrowserExecOptions() []chromedp.ExecAllocatorOption {
