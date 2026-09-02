@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"garmin-connect-workout-cli/internal/workoutdraft"
+	"garmin-connect-workout-cli/internal/workoutprefs"
 
 	"github.com/spf13/cobra"
 )
@@ -34,11 +35,31 @@ func newNovelWorkoutsPlanCmd(flags *rootFlags) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "would parse workout and save a local draft")
 				return nil
 			}
+			allowInput := !flags.noInput && !flags.agent && !flags.asJSON && isTerminalInput(cmd.InOrStdin())
+			prefs, _, found, err := workoutprefs.Load()
+			if err != nil {
+				return configErr(err)
+			}
+			if !found && allowInput {
+				fmt.Fprintln(cmd.ErrOrStderr(), "No saved workout preferences were found. Let's set the ambiguity rules before planning.")
+				prefs, save, err := runWorkoutPreferenceQuestionnaire(cmd.InOrStdin(), cmd.ErrOrStderr())
+				if err != nil {
+					return usageErr(err)
+				}
+				if save {
+					path, err := workoutprefs.Save(prefs)
+					if err != nil {
+						return configErr(err)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "Workout preferences saved locally: %s\n", path)
+				}
+			}
+			preparedPrompt := workoutdraft.ApplyRecoveryPreferences(args[0], prefs.StrideRecovery, prefs.HillSprintRecovery)
 			prompt, err := resolveWorkoutClarifications(
 				cmd.InOrStdin(),
 				cmd.ErrOrStderr(),
-				args[0],
-				!flags.noInput && !flags.agent && isTerminalInput(cmd.InOrStdin()),
+				preparedPrompt,
+				allowInput,
 			)
 			if err != nil {
 				return usageErr(err)

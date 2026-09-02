@@ -49,6 +49,14 @@ What happens:
 - The CLI captures the signed-in browser session for later verified workout reads and writes.
 - The CLI saves a local Garmin web session for later workout uploads and schedule changes.
 
+The command reports success only after a protected Garmin workout request returns
+authenticated JSON while the browser remains on Garmin Workouts. Reaching an SSO
+page or seeing a sign-in screen is not considered logged in.
+
+If it says the dedicated Garmin browser profile is already open, close only that
+Garmin login window and rerun the command. Do not delete the saved profile or
+session files; they contain the browser state needed for the next upload.
+
 The saved browser profile and session are local secrets. Do not share them.
 
 Check local auth state:
@@ -63,22 +71,45 @@ Clear the saved local browser profile:
 garmin-connect-workout-cli auth logout
 ```
 
+## Workout Preferences
+
+Run the short questionnaire before planning workouts:
+
+```bash
+garmin-connect-workout-cli preferences setup
+```
+
+It asks how omitted stride and hill-sprint recoveries should be handled and
+asks for confirmation before saving anything. Preferences are written to a
+private `workout-preferences.json` file in the CLI data directory, outside the
+Git repository. Use `preferences show` to inspect the current values.
+
+Choosing `Always ask` is the default. Saved preferences apply only when the
+workout text omitted that detail; explicit workout instructions always win.
+The stride questionnaire also supports recovery lasting three times a timed
+stride; distance-based strides still require clarification because their
+duration is not known in advance.
+Distance ranges, unclear totals, missing efforts, and other structural
+ambiguities still require clarification and are never inferred from recovery
+preferences. Agent and `--no-input` modes return the questions without
+prompting or saving.
+
 ## Create And Schedule A Workout
 
 Plan a workout first. Planning is local only and does not write to Garmin.
 
 ```bash
-garmin-connect-workout-cli workouts plan "35min easy + drills + 4x20s strides relaxed" \
+garmin-connect-workout-cli workouts plan "35min easy + drills + 4x20s strides relaxed with 40 sec easy jog" \
   --date 2026-06-23 \
   --json
 ```
 
 The planner understands common running shorthand, including unitless track
-repeats such as `6x800`, minute repeats such as `4x3min`, standard stride
-recovery, and hill-sprint walk-down recovery. It asks follow-up questions only
-when a missing detail would materially change the Garmin workout—for example an
-interval recovery, work-rep effort, warmup or cooldown length, an ambiguous
-repeat unit, or how to complete a stated total distance.
+repeats such as `6x800`, minute repeats such as `4x3min`, timed recovery, and
+hill-sprint walk-down recovery. It asks follow-up questions whenever a missing
+detail would materially change the Garmin workout—for example stride or
+interval recovery, work-rep effort, warmup or cooldown length, a distance
+range, an ambiguous repeat unit, or how to complete a stated total distance.
 
 In an interactive terminal, answer by entering the complete workout again with
 the requested details included. With `--no-input` or `--agent`, the command
@@ -102,8 +133,8 @@ Garmin's private API stores the canonical distance in meters, so the payload
 also includes the original preferred-unit metadata that controls the editor's
 distance picker.
 
-For multiple dated drafts, preview and apply them together. `apply-batch` opens
-one visible browser session, discovers a working Garmin backend with a safe
+For multiple dated drafts, preview and apply them together. `apply-batch` reuses
+one verified headless browser session, discovers a working Garmin backend with a safe
 read, spaces every API request and keeps at least ten seconds between mutations,
 checkpoints each successful upload, and verifies every calendar date:
 
@@ -133,10 +164,36 @@ The replacement path reads each workout back from Garmin and verifies its name,
 step types, distances, original distance units, targets, and repeat structure.
 Existing calendar entries remain attached to the same workout IDs.
 
+To edit an existing workout, first note its Garmin workout ID, create a revised
+draft, preview the exact `PUT`, then replace that Garmin workout in place. This
+preserves its workout ID and existing calendar entry by default:
+
+```bash
+garmin-connect-workout-cli workouts plan "revised workout text" \
+  --date 2026-06-25 --name "Existing workout title" --json
+
+garmin-connect-workout-cli workouts apply draft_abc123 --replace 1685533953 --json
+
+garmin-connect-workout-cli workouts apply draft_abc123 --replace 1685533953 \
+  --apply --json
+```
+
+For several existing drafts, use `workouts apply-batch ... --replace-uploaded
+--apply --yes --idempotent`. Do not pass `--schedule` when replacing an already
+scheduled workout unless you intentionally want to add another calendar entry.
+
 HTTP 427 is handled by verifying that the mutation did not land before another
 backend is tried. HTTP 429 stops the whole batch and opens a persistent local
 circuit breaker; later commands refuse before opening the browser until the
 cooldown expires.
+
+For agents, this is the complete multi-workout flow: run the preview first,
+show every draft and scheduled date to the user, then use the second command
+only after the user explicitly approves all listed writes. The batch uses one
+authenticated browser session, applies drafts in the supplied order, stores a
+checkpoint after each verified upload, and reports the completed items if a
+later item stops the batch. Do not rerun a stopped batch blindly: first inspect
+the saved draft checkpoints and the rate-limit or authentication error.
 
 If the draft has `--date`, `workouts apply` schedules it on that date automatically. To upload without adding it to the Garmin calendar:
 
@@ -237,7 +294,7 @@ If you do not pass `--name`, the CLI tries to create a clear Garmin title from t
 Example:
 
 ```bash
-garmin-connect-workout-cli workouts plan "35min E + Drills + 4x20s strides" --date 2026-06-23
+garmin-connect-workout-cli workouts plan "35min E + Drills + 4x20s strides with 40 sec easy jog" --date 2026-06-23
 ```
 
 Default title:
@@ -261,7 +318,7 @@ garmin-connect-workout-cli workouts plan "10 min warmup, 6x800m at 5K pace with 
 Good inputs:
 
 ```text
-35min easy + drills + 4x20s strides
+35min easy + drills + 4x20s strides with 40 sec easy jog
 40min easy by feel at RPE 2-3
 30min easy + 6x10s hill sprint with full recovery
 10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown
@@ -269,13 +326,14 @@ Good inputs:
 2mi easy warmup, 2 sets of (4 min at 10K effort, 60 sec float, 3 min at 5K effort, 60 sec float, 2 min at 3K effort) with 3 min jog between sets, 15 min cooldown
 ```
 
-Default recovery rules:
+Recovery rules:
 
-- Strides without recovery: 60 seconds easy recovery.
-- Hill sprints without a recovery instruction: 90 seconds recovery.
+- Strides and hill sprints without recovery require clarification unless the user explicitly saved a matching preference.
+- The first interactive planning run offers the preference questionnaire; it saves only after confirmation.
+- Explicit recovery in the workout description always overrides a saved preference.
 - `full recovery` without a duration: Garmin waits for the Lap button and skips the recovery after the final repetition.
 - An explicit duration such as `2 min full recovery` remains a timed recovery.
-- If recovery matters, be explicit: `with 2 min jog`, `with 90 sec walk`, `with 400m jog`.
+- Be explicit when possible: `with 40 sec easy jog`, `with 90 sec walk`, `with 400m jog`, or `with full recovery`.
 
 ## Agent Usage
 
@@ -295,12 +353,23 @@ Then apply only after showing the user the draft and getting confirmation:
 garmin-connect-workout-cli workouts apply draft_abc123 --apply --json --agent
 ```
 
+For several approved dated drafts, use the guarded batch command rather than
+opening one browser session per workout:
+
+```bash
+garmin-connect-workout-cli workouts apply-batch draft_a draft_b --json --agent
+
+garmin-connect-workout-cli workouts apply-batch draft_a draft_b \
+  --apply --yes --idempotent --json --agent
+```
+
 Agent safety rules:
 
 - Do not ask the user to paste a Garmin password into chat.
 - Use `auth login-browser` for login and MFA.
 - Treat `workouts plan` as safe: it only writes a local draft.
 - Treat `workouts apply`, `workouts upload-json`, `schedule create`, `schedule delete`, `workouts delete`, and `workouts reconcile --apply` as live Garmin writes.
+- Treat `workouts apply-batch --apply --yes` as a sequence of live Garmin writes; preview every item and get approval for the complete list first.
 - If the user gives a date, expect `workouts apply` to schedule the workout unless `--no-schedule` is used.
 
 ## Browser Behavior

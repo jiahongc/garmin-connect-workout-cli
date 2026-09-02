@@ -15,7 +15,7 @@ func TestPlanParsesRepeatWorkout(t *testing.T) {
 	if draft.ID == "" {
 		t.Fatal("expected draft id")
 	}
-	if draft.Workout.Name != "July 1: Run 6X800M" {
+	if draft.Workout.Name != "July 1: 6x800m @ 5K" {
 		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
 	}
 	if len(draft.Workout.Steps) != 3 {
@@ -28,8 +28,28 @@ func TestPlanParsesRepeatWorkout(t *testing.T) {
 	if len(repeat.Steps) != 2 {
 		t.Fatalf("expected interval + recovery child steps, got %d", len(repeat.Steps))
 	}
-	if draft.GarminPayload["workoutName"] != "July 1: Run 6X800M" {
+	if draft.GarminPayload["workoutName"] != "July 1: 6x800m @ 5K" {
 		t.Fatalf("payload did not carry workout name: %#v", draft.GarminPayload["workoutName"])
+	}
+}
+
+func TestPlanTitlesQualityTimeRepeatsOverWarmup(t *testing.T) {
+	draft, err := Plan("20min easy + 8x2min at 10K effort with 2min easy jog + 12min cooldown", "2026-09-02", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if draft.Workout.Name != "September 2: 8x2min @ 10K" {
+		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
+	}
+}
+
+func TestPlanKeepsEasyOnlyWorkoutTitle(t *testing.T) {
+	draft, err := Plan("45min easy", "2026-07-01", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if draft.Workout.Name != "July 1: 45E" {
+		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
 	}
 }
 
@@ -47,14 +67,14 @@ func TestPlanInfersMetersForStandardUnitlessTrackRepeats(t *testing.T) {
 	}
 }
 
-func TestPlanUsesStandardRecoveryForDistanceStrides(t *testing.T) {
-	draft, err := Plan("4x100m strides relaxed", "2026-07-01", "")
+func TestPlanUsesExplicitRecoveryForDistanceStrides(t *testing.T) {
+	draft, err := Plan("4x100m strides relaxed with 40 sec easy jog", "2026-07-01", "")
 	if err != nil {
 		t.Fatalf("Plan returned error: %v", err)
 	}
 	repeat := draft.Workout.Steps[0]
-	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 60 {
-		t.Fatalf("repeat = %#v, want a standard 60-second stride recovery", repeat)
+	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 40 {
+		t.Fatalf("repeat = %#v, want the explicit 40-second stride recovery", repeat)
 	}
 }
 
@@ -78,10 +98,7 @@ func TestPlanUnderstandsMinuteBasedRepeatShorthand(t *testing.T) {
 func TestClarificationsOnlyFlagsMaterialWorkoutAmbiguity(t *testing.T) {
 	for _, prompt := range []string{
 		"10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown",
-		"35min easy + drills + 4x20s strides relaxed",
-		"30 min easy, 6x10s hill sprints with walk down the hill",
 		"4x200m relaxed fast with full recovery",
-		"4x100m strides relaxed",
 		"6x800 at 5K pace with 2 min jog",
 		"4x3min at threshold with 90 sec jog",
 		"9mi medium long easy, 2 sets of (4x200m at 5:10-5:50/mi with 200m jog)",
@@ -137,6 +154,24 @@ func TestClarificationsExplainMissingWorkoutDetails(t *testing.T) {
 			wantCode:   "total_distance",
 			wantPhrase: "8mi total",
 		},
+		{
+			name:       "stride recovery is never assumed",
+			prompt:     "35min easy + 4x20s relaxed strides",
+			wantCode:   "repeat_recovery",
+			wantPhrase: "recovery",
+		},
+		{
+			name:       "hill recovery is never assumed",
+			prompt:     "30 min easy + 6x10s hill sprints",
+			wantCode:   "repeat_recovery",
+			wantPhrase: "recovery",
+		},
+		{
+			name:       "distance range needs an exact Garmin structure",
+			prompt:     "6-7mi easy + 6x20s relaxed strides with 40 sec easy jog",
+			wantCode:   "distance_range",
+			wantPhrase: "6-7mi",
+		},
 	}
 
 	for _, tc := range tests {
@@ -182,12 +217,12 @@ func TestPlanParsesNestedSetWorkout(t *testing.T) {
 	}
 }
 
-func TestPlanParsesScreenshotStyleWorkoutWithNotesAndDefaultStrideRecovery(t *testing.T) {
+func TestPlanDoesNotDefaultStrideRecovery(t *testing.T) {
 	draft, err := Plan("35min E + Drills + 4x20s strides 全程放松，不追配速", "2026-06-23", "")
 	if err != nil {
 		t.Fatalf("Plan returned error: %v", err)
 	}
-	if draft.Workout.Name != "June 23: 35E + Drills + 4x20s strides" {
+	if draft.Workout.Name != "June 23: 4x20s Strides" {
 		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
 	}
 	if len(draft.Workout.Notes) != 1 || draft.Workout.Notes[0] != "Drills" {
@@ -197,8 +232,52 @@ func TestPlanParsesScreenshotStyleWorkoutWithNotesAndDefaultStrideRecovery(t *te
 	if repeat.StepType != "repeat" || repeat.Repeat != 4 {
 		t.Fatalf("expected 4-stride repeat, got %#v", repeat)
 	}
-	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 60 {
-		t.Fatalf("expected default 60 second stride recovery, got %#v", repeat.Steps)
+	if len(repeat.Steps) != 1 {
+		t.Fatalf("stride recovery was silently defaulted: %#v", repeat.Steps)
+	}
+}
+
+func TestApplyRecoveryPreferencesUsesSavedValuesOnlyWhenMissing(t *testing.T) {
+	prompt := ApplyRecoveryPreferences(
+		"35min easy + 4x20s relaxed strides + 6x10s hill sprints",
+		"40 sec easy jog",
+		"walk down the hill",
+	)
+	for _, want := range []string{"4x20s relaxed strides with 40 sec easy jog", "6x10s hill sprints with walk down the hill"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("ApplyRecoveryPreferences() = %q, want %q", prompt, want)
+		}
+	}
+
+	explicit := "4x20s relaxed strides with 30 sec easy jog"
+	if got := ApplyRecoveryPreferences(explicit, "60 sec easy jog", "90 sec easy jog"); got != explicit {
+		t.Fatalf("explicit recovery changed from %q to %q", explicit, got)
+	}
+}
+
+func TestApplyRecoveryPreferencesCalculatesTripleTimedStrideDuration(t *testing.T) {
+	prompt := ApplyRecoveryPreferences(
+		"35min easy + 6x20s relaxed strides",
+		"3x stride duration",
+		"ask",
+	)
+	if !strings.Contains(prompt, "6x20s relaxed strides with 60 sec recovery") {
+		t.Fatalf("ApplyRecoveryPreferences() = %q, want calculated 60-second recovery", prompt)
+	}
+	if questions := Clarifications(prompt); len(questions) != 0 {
+		t.Fatalf("Clarifications(%q) = %#v, want none", prompt, questions)
+	}
+}
+
+func TestApplyRecoveryPreferencesAsksWhenTripleDurationCannotBeCalculated(t *testing.T) {
+	original := "4x100m relaxed strides"
+	prompt := ApplyRecoveryPreferences(original, "3x stride duration", "ask")
+	if prompt != original {
+		t.Fatalf("ApplyRecoveryPreferences() = %q, want unchanged distance-based stride", prompt)
+	}
+	questions := Clarifications(prompt)
+	if len(questions) == 0 || questions[0].Code != "repeat_recovery" {
+		t.Fatalf("Clarifications(%q) = %#v, want recovery clarification", prompt, questions)
 	}
 }
 

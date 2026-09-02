@@ -319,8 +319,6 @@ func parseRepeat(s string) (Step, bool) {
 	} else if recovery, ok := parseManualRecovery(recoveryText); ok {
 		children = append(children, recovery)
 		skipLastRecovery = true
-	} else if recovery := defaultRecoveryForRepeat(strings.ToLower(s)); recovery.DurationSec > 0 {
-		children = append(children, recovery)
 	}
 	return Step{
 		Name:             fmt.Sprintf("%dx%s%s", repeat, trimFloat(dist), unit),
@@ -390,8 +388,6 @@ func parseTimeRepeat(s string) (Step, bool) {
 	} else if recovery, ok := parseManualRecovery(s); ok {
 		children = append(children, recovery)
 		skipLastRecovery = true
-	} else if recovery := defaultRecoveryForRepeat(lower); recovery.DurationSec > 0 {
-		children = append(children, recovery)
 	}
 	return Step{
 		Name:             fmt.Sprintf("%dx%s %s", repeat, durationLabel, strings.ToLower(name)),
@@ -474,17 +470,6 @@ func applyManualRecovery(steps *[]Step, text string) bool {
 	last.Steps = append(last.Steps, recovery)
 	last.SkipLastRecovery = skipLastRecovery
 	return true
-}
-
-func defaultRecoveryForRepeat(lower string) Step {
-	switch {
-	case strings.Contains(lower, "hill"):
-		return Step{Name: "Recovery", StepType: "recovery", DurationSec: 90, Notes: "Hill sprint recovery, defaulted to 90 seconds"}
-	case strings.Contains(lower, "stride"):
-		return Step{Name: "Recovery", StepType: "recovery", DurationSec: 60, Notes: "Stride recovery, defaulted to 60 seconds"}
-	default:
-		return Step{}
-	}
 }
 
 func isRecoveryText(s string) bool {
@@ -764,6 +749,12 @@ func isEasyText(lower string) bool {
 }
 
 func inferName(prompt string, date string) string {
+	if qualityName := inferredQualityName(prompt); qualityName != "" {
+		if dateLabel := displayDate(date); dateLabel != "" {
+			return dateLabel + ": " + qualityName
+		}
+		return qualityName
+	}
 	pieces := inferredNamePieces(prompt)
 	if len(pieces) > 0 {
 		name := strings.Join(pieces, " + ")
@@ -783,6 +774,86 @@ func inferName(prompt string, date string) string {
 		return dateLabel + ": Run Workout"
 	}
 	return "Run Workout"
+}
+
+// inferredQualityName favors the actual work block over warmup and cooldown
+// whenever a workout contains faster repetitions. Easy-only runs continue to
+// use the simpler name inferred by inferredNamePieces.
+func inferredQualityName(prompt string) string {
+	if m := regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|sec(?:ond)?s?|s|")\s*(?:at|@)\s*([^,+/]+)`).FindStringSubmatch(prompt); m != nil {
+		if target := conciseWorkoutTarget(m[4]); target != "" {
+			return fmt.Sprintf("%sx%s%s @ %s", m[1], trimNumberText(m[2]), titleDurationUnit(m[3]), target)
+		}
+	}
+	if m := regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(km|k|mi|mile|miles|m)?\s*(?:at|@)\s*([^,+/]+)`).FindStringSubmatch(prompt); m != nil {
+		if target := conciseWorkoutTarget(m[4]); target != "" {
+			return fmt.Sprintf("%sx%s%s @ %s", m[1], trimNumberText(m[2]), titleDistanceUnit(m[3]), target)
+		}
+	}
+	if m := regexp.MustCompile(`(?i)\b(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|sec(?:ond)?s?|s|")\b[^,+/]*(hill\s*sprint|stride|sprint|fast|hard)`).FindStringSubmatch(prompt); m != nil {
+		return fmt.Sprintf("%sx%s%s %s", m[1], trimNumberText(m[2]), titleDurationUnit(m[3]), titleRepetitionLabel(m[4]))
+	}
+	return ""
+}
+
+func conciseWorkoutTarget(raw string) string {
+	lower := strings.ToLower(raw)
+	if beforeRecovery, _, found := strings.Cut(lower, " with "); found {
+		lower = beforeRecovery
+	}
+	if isEasyText(lower) || strings.Contains(lower, "recovery") || strings.Contains(lower, "jog") {
+		return ""
+	}
+	for _, target := range []struct {
+		match string
+		label string
+	}{
+		{"10k", "10K"},
+		{"5k", "5K"},
+		{"3k", "3K"},
+		{"threshold", "Threshold"},
+		{"tempo", "Tempo"},
+		{"marathon", "Marathon"},
+		{"half", "Half"},
+	} {
+		if strings.Contains(lower, target.match) {
+			return target.label
+		}
+	}
+	return ""
+}
+
+func titleDurationUnit(raw string) string {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "min") {
+		return "min"
+	}
+	return "s"
+}
+
+func titleDistanceUnit(raw string) string {
+	switch strings.ToLower(raw) {
+	case "k", "km":
+		return "km"
+	case "mi", "mile", "miles":
+		return "mi"
+	default:
+		return "m"
+	}
+}
+
+func titleRepetitionLabel(raw string) string {
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "hill"):
+		return "Hill Sprints"
+	case strings.Contains(lower, "stride"):
+		return "Strides"
+	case strings.Contains(lower, "sprint"):
+		return "Sprints"
+	default:
+		return "Intervals"
+	}
 }
 
 func inferredNamePieces(prompt string) []string {

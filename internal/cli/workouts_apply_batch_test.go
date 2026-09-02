@@ -36,6 +36,24 @@ func TestLoadWorkoutApplyBatchItemsRejectsDuplicateDrafts(t *testing.T) {
 	}
 }
 
+func TestWorkoutApplyBatchPreviewListsEveryDraftInRequestedOrder(t *testing.T) {
+	store := workoutdraft.Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
+	first := mustSaveBatchDraft(t, store, "First", "2026-07-28")
+	second := mustSaveBatchDraft(t, store, "Second", "2026-08-04")
+	items, err := loadWorkoutApplyBatchItems(store, []string{second.ID, first.ID}, false)
+	if err != nil {
+		t.Fatalf("loadWorkoutApplyBatchItems() error = %v", err)
+	}
+	preview := workoutApplyBatchPreview(items, false, false, defaultGarminBatchMutationDelay)
+	if preview["draft_count"] != 2 || preview["browser_sessions"] != 1 {
+		t.Fatalf("preview = %#v", preview)
+	}
+	drafts, ok := preview["drafts"].([]map[string]any)
+	if !ok || len(drafts) != 2 || drafts[0]["draft_id"] != second.ID || drafts[1]["draft_id"] != first.ID {
+		t.Fatalf("preview drafts = %#v", preview["drafts"])
+	}
+}
+
 func TestApplyWorkoutBatchItemCheckpointsUploadAndVerifiedSchedule(t *testing.T) {
 	store := workoutdraft.Store{Path: filepath.Join(t.TempDir(), "drafts.json")}
 	draft := mustSaveBatchDraft(t, store, "Workout A", "2026-07-28")

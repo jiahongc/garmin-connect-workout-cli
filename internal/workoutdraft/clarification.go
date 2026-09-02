@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"garmin-connect-workout-cli/internal/workoutprefs"
 )
 
 // Clarification describes one material detail that must be resolved before the
@@ -30,6 +32,13 @@ func Clarifications(prompt string) []Clarification {
 		}
 		seen[key] = struct{}{}
 		questions = append(questions, Clarification{Code: code, Question: question})
+	}
+
+	if distanceRange := statedDistanceRange(prompt); distanceRange != "" {
+		add(
+			"distance_range",
+			fmt.Sprintf("For %q, what exact total distance should Garmin use, and do the strides and recoveries count inside that total?", distanceRange),
+		)
 	}
 
 	if total := statedTotalDistance(prompt); total != "" && workoutHasMultipleComponents(prompt) {
@@ -78,9 +87,6 @@ func Clarifications(prompt string) []Clarification {
 		if index+1 < len(parts) && isExplicitRecovery(strings.TrimSpace(parts[index+1])) {
 			continue
 		}
-		if defaultRecoveryForRepeat(lower).DurationSec > 0 {
-			continue
-		}
 		if hasVagueRecoveryCue(lower) {
 			add(
 				"repeat_recovery",
@@ -94,6 +100,60 @@ func Clarifications(prompt string) []Clarification {
 		)
 	}
 	return questions
+}
+
+// ApplyRecoveryPreferences adds only recovery values the user explicitly
+// saved. Explicit recovery in the workout text always wins.
+func ApplyRecoveryPreferences(prompt, strideRecovery, hillRecovery string) string {
+	parts := splitPromptParts(prompt)
+	for index, raw := range parts {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		repeat, ok := repeatForClarification(part)
+		if !ok || repeatHasRecovery(repeat) {
+			parts[index] = part
+			continue
+		}
+		if index+1 < len(parts) && isExplicitRecovery(strings.TrimSpace(parts[index+1])) {
+			parts[index] = part
+			continue
+		}
+
+		lower := strings.ToLower(part)
+		preference := ""
+		switch {
+		case strings.Contains(lower, "stride"):
+			preference = strideRecovery
+		case strings.Contains(lower, "hill"):
+			preference = hillRecovery
+		}
+		preference = strings.TrimSpace(preference)
+		if preference == "" || strings.EqualFold(preference, "ask") {
+			parts[index] = part
+			continue
+		}
+		if preference == workoutprefs.TripleStrideDuration {
+			if repeat.Steps[0].DurationSec == 0 {
+				parts[index] = part
+				continue
+			}
+			preference = fmt.Sprintf("%d sec recovery", repeat.Steps[0].DurationSec*3)
+		}
+
+		candidate := part + " with " + preference
+		resolved, ok := repeatForClarification(candidate)
+		if !ok || !repeatHasRecovery(resolved) {
+			parts[index] = part
+			continue
+		}
+		parts[index] = candidate
+	}
+	for index := range parts {
+		parts[index] = strings.TrimSpace(parts[index])
+	}
+	return strings.Join(parts, ", ")
 }
 
 func repeatForClarification(part string) (Step, bool) {
@@ -169,6 +229,11 @@ func statedTotalDistance(prompt string) string {
 		return ""
 	}
 	return strings.TrimSpace(match[0])
+}
+
+func statedDistanceRange(prompt string) string {
+	match := regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\s*(?:km|k|mi|mile|miles)\b`).FindString(prompt)
+	return strings.TrimSpace(match)
 }
 
 func workoutHasMultipleComponents(prompt string) bool {

@@ -237,7 +237,7 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 		network.Enable(),
 		chromedp.Navigate("https://connect.garmin.com/app/workouts"),
 	); err != nil {
-		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in the browser: %w", err)
+		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in the browser: %w", garminBrowserProfileError(err))
 	}
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -262,15 +262,7 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 			if !isGarminConnectAppLocation(lastLocation) {
 				continue
 			}
-			markGarminPageActivity(lastLocation, capture)
-			session, ok, err := currentCapturedSession(ctx, capture)
-			if err != nil {
-				if isTransientChromeContextError(err) {
-					continue
-				}
-				return garminsession.Session{}, err
-			}
-			if !ok || !sessionCandidateActive(session) || time.Now().Before(nextProbe) {
+			if time.Now().Before(nextProbe) {
 				continue
 			}
 			nextProbe = time.Now().Add(10 * time.Second)
@@ -284,12 +276,31 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 				lastProbeErr = probeErr
 				continue
 			}
-			refreshed, ok, err := currentCapturedSession(ctx, capture)
+			// The browser can briefly report the Garmin app URL before SSO redirects
+			// away. Require a successful protected workout request and a final
+			// authenticated-app location before persisting a session.
+			location, err = browserLocation(ctx)
 			if err != nil {
+				if isTransientChromeContextError(err) {
+					continue
+				}
 				return garminsession.Session{}, err
 			}
-			if ok && sessionCandidateActive(refreshed) {
-				session = refreshed
+			lastLocation = location
+			if !isGarminConnectAppLocation(lastLocation) {
+				lastProbeErr = fmt.Errorf("Garmin redirected the browser to %s after the workout probe", lastLocation)
+				continue
+			}
+			session, ok, err := currentCapturedSession(ctx, capture)
+			if err != nil {
+				if isTransientChromeContextError(err) {
+					continue
+				}
+				return garminsession.Session{}, err
+			}
+			if !ok || !sessionCandidateActive(session) {
+				lastProbeErr = fmt.Errorf("Garmin workout API responded, but no authenticated browser session was captured")
+				continue
 			}
 			session.VerifiedAt = time.Now()
 			if action != nil {
@@ -308,8 +319,10 @@ func sessionCandidateActive(session garminsession.Session) bool {
 
 func isGarminConnectAppLocation(location string) bool {
 	parsed, err := url.Parse(location)
-	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com" &&
-		(strings.HasPrefix(parsed.Path, "/app/") || strings.HasPrefix(parsed.Path, "/modern/"))
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "connect.garmin.com" {
+		return false
+	}
+	return strings.HasPrefix(parsed.Path, "/app/workouts") || strings.HasPrefix(parsed.Path, "/modern/workouts")
 }
 
 type webSessionCapture struct {
@@ -364,73 +377,8 @@ func captureGarminSessionHeaders(capture *webSessionCapture, headers network.Hea
 	}
 }
 
-func markGarminSessionSeen(capture *webSessionCapture) {
-	capture.mu.Lock()
-	capture.seenAPI = true
-	capture.mu.Unlock()
-}
-
 func captureGarminWebSession(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
-	opts := []chromedp.ExecAllocatorOption{
-		chromedp.NoFirstRun,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.Flag("headless", false),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.UserDataDir(profileDir),
-		chromedp.WindowSize(1280, 900),
-	}
-	opts = append(opts, garminBrowserExecOptions()...)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
-	defer allocCancel()
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
-
-	capture := &webSessionCapture{}
-	startGarminSessionCapture(ctx, capture)
-
-	if err := chromedp.Run(ctx,
-		network.Enable(),
-		chromedp.Navigate("https://connect.garmin.com/modern/workouts"),
-	); err != nil {
-		return garminsession.Session{}, fmt.Errorf("opening Garmin Connect in the browser: %w", err)
-	}
-
-	ticker := time.NewTicker(750 * time.Millisecond)
-	defer ticker.Stop()
-	nextStatus := time.Now()
-	lastLocation := ""
-	for {
-		select {
-		case <-ctx.Done():
-			return garminsession.Session{}, fmt.Errorf("timed out waiting for Garmin browser login; sign in, open Workouts, and rerun auth login-browser")
-		case <-ticker.C:
-			location, err := browserLocation(ctx)
-			if err != nil && !isTransientChromeContextError(err) {
-				return garminsession.Session{}, err
-			}
-			if location != "" {
-				lastLocation = location
-			}
-			if time.Now().After(nextStatus) {
-				nextStatus = time.Now().Add(10 * time.Second)
-				if lastLocation == "" {
-					fmt.Fprintln(os.Stderr, "Waiting for Garmin browser page...")
-				} else {
-					fmt.Fprintf(os.Stderr, "Waiting for Garmin sign-in from browser page: %s\n", lastLocation)
-				}
-			}
-			markGarminPageActivity(location, capture)
-			session, ok, err := currentCapturedSession(ctx, capture)
-			if err != nil {
-				return garminsession.Session{}, err
-			}
-			if ok {
-				return session, nil
-			}
-		}
-	}
+	return verifyGarminBrowserProfile(parent, profileDir, timeout)
 }
 
 func browserLocation(ctx context.Context) (string, error) {
@@ -439,13 +387,6 @@ func browserLocation(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("reading browser location: %w", err)
 	}
 	return location, nil
-}
-
-func markGarminPageActivity(location string, capture *webSessionCapture) {
-	if !strings.Contains(location, "garmin.com") {
-		return
-	}
-	markGarminSessionSeen(capture)
 }
 
 func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (garminsession.Session, bool, error) {
@@ -604,7 +545,15 @@ func firstJWTInText(text string) string {
 }
 
 func isGarminSessionRequest(rawURL string) bool {
-	return strings.Contains(rawURL, "garmin.com")
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "connect.garmin.com" && host != "connectapi.garmin.com" {
+		return false
+	}
+	return strings.Contains(parsed.Path, "/workout-service/")
 }
 
 func networkHeader(headers network.Headers, name string) string {

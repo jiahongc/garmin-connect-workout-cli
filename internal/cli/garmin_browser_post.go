@@ -142,7 +142,17 @@ func runGarminBrowserWithSession(
 		}
 		return action(ctx)
 	}))
-	return chromedp.Run(browserCtx, actions...)
+	return garminBrowserProfileError(chromedp.Run(browserCtx, actions...))
+}
+
+func garminBrowserProfileError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "opening in existing browser session") {
+		return fmt.Errorf("Garmin browser profile is already open. Close only the dedicated Garmin Connect browser window, then rerun the command; do not delete the saved profile or session: %w", err)
+	}
+	return err
 }
 
 func isGarminConnectLocation(rawURL string) bool {

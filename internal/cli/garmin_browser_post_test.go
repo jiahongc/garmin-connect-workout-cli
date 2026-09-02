@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,9 +48,39 @@ func TestGarminLoginSessionCheckOnlyRunsFromConnectApp(t *testing.T) {
 		{"https://sso.garmin.com/portal/sso/en-US/sign-in", false},
 		{"https://connect.garmin.com/app/workouts", true},
 		{"https://connect.garmin.com/modern/workouts", true},
+		{"https://connect.garmin.com/app/activities", false},
+		{"https://connect.garmin.com/modern/proxy/workout-service/workouts", false},
 	} {
 		if got := isGarminConnectAppLocation(tt.location); got != tt.want {
 			t.Fatalf("isGarminConnectAppLocation(%q) = %v, want %v", tt.location, got, tt.want)
+		}
+	}
+}
+
+func TestGarminSessionCaptureOnlyAcceptsWorkoutAPIRequests(t *testing.T) {
+	for _, tt := range []struct {
+		url  string
+		want bool
+	}{
+		{"https://sso.garmin.com/portal/sso/en-US/sign-in", false},
+		{"https://connect.garmin.com/app/workouts", false},
+		{"https://connect.garmin.com/modern/workouts", false},
+		{"https://connect.garmin.com/gc-api/workout-service/workouts?start=0&limit=1", true},
+		{"https://connectapi.garmin.com/workout-service/workout/42", true},
+		{"https://connect.garmin.com/modern/proxy/workout-service/schedule/42", true},
+		{"https://evil.example/workout-service/workouts", false},
+	} {
+		if got := isGarminSessionRequest(tt.url); got != tt.want {
+			t.Fatalf("isGarminSessionRequest(%q) = %v, want %v", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestGarminBrowserProfileErrorExplainsProfileLock(t *testing.T) {
+	err := garminBrowserProfileError(fmt.Errorf("chrome failed to start: Opening in existing browser session."))
+	for _, want := range []string{"profile is already open", "Close only the dedicated Garmin Connect browser window", "do not delete"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("profile-lock error = %q, want substring %q", err, want)
 		}
 	}
 }
