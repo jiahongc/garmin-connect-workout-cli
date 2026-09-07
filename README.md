@@ -1,4 +1,4 @@
-# garmin-connect-workout-cli
+# Garmin Connect Workout CLI
 
 A small, unofficial CLI for creating running workouts in Garmin Connect from plain English.
 
@@ -13,6 +13,8 @@ The main flow is:
 
 The CLI can also list, inspect, update, delete, and schedule existing Garmin workouts. Routine single-workout commands reuse the saved Garmin session automatically. For a multi-workout cleanup, `workouts reconcile` keeps one visible authenticated browser session open while the CLI performs and verifies the API operations.
 
+[Install](#install) · [Login](#login) · [Create a workout](#create-and-schedule-a-workout) · [Reconcile](#reconcile-a-workout-library) · [Agent usage](#agent-usage)
+
 ## Install
 
 Requirements:
@@ -24,10 +26,14 @@ Requirements:
 Install from this repo:
 
 ```bash
+git clone https://github.com/jiahongc/garmin-connect-workout-cli.git
+cd garmin-connect-workout-cli
 go install ./cmd/garmin-connect-workout-cli
 ```
 
-Or build a local binary:
+The module pins Go 1.26.4 as its toolchain. Make sure Go’s binary directory (`go env GOPATH`, followed by `/bin`, unless `GOBIN` is set) is on your `PATH`.
+
+Or build a local binary from the same checkout:
 
 ```bash
 make build
