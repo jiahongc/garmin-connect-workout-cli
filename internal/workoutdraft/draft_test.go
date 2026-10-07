@@ -503,3 +503,72 @@ func TestPlanRejectsInvalidDate(t *testing.T) {
 		t.Fatal("expected invalid date error")
 	}
 }
+
+func TestPlanKeepsPaceOffsetInTargetInsteadOfSplittingOnPlus(t *testing.T) {
+	draft, err := Plan("2 mi warmup, 2x2 mi at GMP+5-10sec with 4 min easy jog recovery, 3 mi cooldown", "2026-10-07", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if len(draft.Workout.Steps) != 3 {
+		t.Fatalf("expected warmup, repeat, cooldown; got %#v", draft.Workout.Steps)
+	}
+	repeat := draft.Workout.Steps[1]
+	if repeat.Steps[0].Target != "GMP+5-10sec" {
+		t.Fatalf("rep target = %q, want GMP+5-10sec", repeat.Steps[0].Target)
+	}
+	if len(repeat.Steps) != 2 || repeat.Steps[1].DurationSec != 240 {
+		t.Fatalf("recovery should be 4 min, got %#v", repeat.Steps)
+	}
+}
+
+func TestPlanTreatsTrailingNoteAsNotesNotSteps(t *testing.T) {
+	for _, prompt := range []string{
+		"2 mi warmup, 2x2 mi at GMP effort with 4 min easy jog recovery, 3 mi cooldown. Note: reps GMP plus 5 to 10 sec",
+		"2 mi warmup, 2x2 mi at GMP effort with 4 min easy jog recovery, 3 mi cooldown, Notes: reps GMP plus 5 to 10 sec",
+	} {
+		draft, err := Plan(prompt, "2026-10-07", "")
+		if err != nil {
+			t.Fatalf("Plan(%q) returned error: %v", prompt, err)
+		}
+		steps := draft.Workout.Steps
+		if len(steps) != 3 {
+			t.Fatalf("Plan(%q) expected 3 steps, got %#v", prompt, steps)
+		}
+		if cd := steps[2]; cd.StepType != "cooldown" || cd.Distance != 3 || cd.DurationSec != 0 {
+			t.Fatalf("Plan(%q) cooldown = %#v, want 3 mi distance step", prompt, cd)
+		}
+		if len(draft.Workout.Notes) != 1 || draft.Workout.Notes[0] != "reps GMP plus 5 to 10 sec" {
+			t.Fatalf("Plan(%q) notes = %#v", prompt, draft.Workout.Notes)
+		}
+	}
+}
+
+func TestPlanPrefersFirstQuantityInStep(t *testing.T) {
+	draft, err := Plan("10 min easy, 2 mi cooldown (about 15 min)", "", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if cd := draft.Workout.Steps[1]; cd.Distance != 2 || cd.DurationSec != 0 {
+		t.Fatalf("cooldown = %#v, want 2 mi", cd)
+	}
+}
+
+func TestPlanTitlesGoalMarathonPaceRepeats(t *testing.T) {
+	draft, err := Plan("2 mi warmup, 2x2 mi at GMP+5-10sec with 4 min easy jog recovery, 3 mi cooldown", "2026-10-07", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if draft.Workout.Name != "October 7: 2x2mi @ GMP" {
+		t.Fatalf("unexpected workout name: %s", draft.Workout.Name)
+	}
+}
+
+func TestPlanTitleIgnoresEasyRecoveryJog(t *testing.T) {
+	draft, err := Plan("2 mi warmup, 3x1 mi hard with 4 min easy jog, 2 mi cooldown", "2026-10-07", "")
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if strings.Contains(draft.Workout.Name, "4E") {
+		t.Fatalf("recovery jog leaked into title: %s", draft.Workout.Name)
+	}
+}

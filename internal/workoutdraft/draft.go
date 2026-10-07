@@ -196,10 +196,18 @@ func (s Store) write(drafts []Draft) error {
 	return cliutil.AtomicWritePrivateFile(s.Path, append(data, '\n'), 0o600, 0o700)
 }
 
+var noteMarker = regexp.MustCompile(`(?i)[.,;]?\s*\bnotes?\s*:`)
+
 func parsePrompt(prompt string) ([]Step, []string, error) {
+	var notes []string
+	if loc := noteMarker.FindStringIndex(prompt); loc != nil {
+		if note := strings.TrimSpace(prompt[loc[1]:]); note != "" {
+			notes = append(notes, note)
+		}
+		prompt = prompt[:loc[0]]
+	}
 	parts := splitPromptParts(prompt)
 	var steps []Step
-	var notes []string
 	for _, raw := range parts {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -245,6 +253,9 @@ func splitPromptParts(prompt string) []string {
 				depth--
 			}
 		case ',', ';', '+':
+			if r == '+' && isPaceOffset(prompt, i) {
+				continue
+			}
 			if depth == 0 {
 				parts = append(parts, prompt[start:i])
 				start = i + 1
@@ -259,6 +270,14 @@ func splitPromptParts(prompt string) []string {
 		out = append(out, then.Split(part, -1)...)
 	}
 	return out
+}
+
+var paceOffset = regexp.MustCompile(`(?i)^\d+(?:\s*[-–]\s*\d+)?\s*(?:s|sec|secs|seconds)\b`)
+
+// isPaceOffset reports whether the '+' at i modifies a pace label, as in
+// "GMP+5-10sec", rather than joining two workout steps.
+func isPaceOffset(prompt string, i int) bool {
+	return i > 0 && prompt[i-1] != ' ' && paceOffset.MatchString(prompt[i+1:])
 }
 
 func parseSetRepeat(s string) (Step, bool) {
@@ -493,7 +512,12 @@ func parseRecovery(s string) (Step, bool) {
 
 func parseSingle(s string) (Step, bool) {
 	lower := strings.ToLower(s)
-	if m := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(min|mins|minute|minutes|sec|secs|second|seconds)\b`).FindStringSubmatch(s); m != nil {
+	durationRe := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(min|mins|minute|minutes|sec|secs|second|seconds)\b`)
+	distanceRe := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)\b`)
+	// The first quantity defines the step; later ones are commentary.
+	dur, dist := durationRe.FindStringIndex(s), distanceRe.FindStringIndex(s)
+	if dur != nil && (dist == nil || dur[0] < dist[0]) {
+		m := durationRe.FindStringSubmatch(s)
 		n, _ := strconv.ParseFloat(m[1], 64)
 		sec := int(math.Round(n))
 		if strings.HasPrefix(strings.ToLower(m[2]), "min") {
@@ -515,7 +539,7 @@ func parseSingle(s string) (Step, bool) {
 		}
 		return Step{Name: name, StepType: stepType, DurationSec: sec, Target: extractTarget(s), Notes: s}, true
 	}
-	if m := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(km|k|m|mi|mile|miles)\b`).FindStringSubmatch(s); m != nil {
+	if m := distanceRe.FindStringSubmatch(s); m != nil {
 		n, _ := strconv.ParseFloat(m[1], 64)
 		unit := normalizeDistanceUnit(m[2])
 		stepType := "interval"
@@ -811,6 +835,7 @@ func conciseWorkoutTarget(raw string) string {
 		{"10k", "10K"},
 		{"5k", "5K"},
 		{"3k", "3K"},
+		{"gmp", "GMP"},
 		{"threshold", "Threshold"},
 		{"tempo", "Tempo"},
 		{"marathon", "Marathon"},
@@ -859,7 +884,9 @@ func titleRepetitionLabel(raw string) string {
 func inferredNamePieces(prompt string) []string {
 	lower := strings.ToLower(prompt)
 	var pieces []string
-	if m := regexp.MustCompile(`(?i)\b(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes)\s*(?:easy|e)\b`).FindStringSubmatch(prompt); m != nil {
+	// "with 4 min easy jog" is recovery, not an easy-run segment.
+	withoutRecovery := regexp.MustCompile(`(?i)\bwith\b[^,;+]*`).ReplaceAllString(prompt, "")
+	if m := regexp.MustCompile(`(?i)\b(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes)\s*(?:easy|e)\b`).FindStringSubmatch(withoutRecovery); m != nil {
 		pieces = append(pieces, trimNumberText(m[1])+"E")
 	}
 	if strings.Contains(lower, "drill") {
