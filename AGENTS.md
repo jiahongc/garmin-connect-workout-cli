@@ -7,7 +7,7 @@ This repo contains `garmin-connect-workout-cli`, a Go CLI for creating Garmin Co
 - Keep changes small and directly tied to the requested behavior.
 - Do not ask users to paste Garmin credentials into chat.
 - Prefer `auth login-browser` for Garmin sign-in and MFA.
-- Treat browser profile data and token files as local secrets.
+- Treat the browser profile and saved web session as local secrets.
 - Do not commit or push unless the user explicitly asks.
 
 ## Commands
@@ -24,19 +24,22 @@ go build ./cmd/garmin-connect-workout-cli
 Safe local commands:
 
 - `workouts plan`
-- `history list`
-- `history search`
+- `history search` (no query lists all drafts)
 - `auth status`
-- `doctor`
+- `doctor` (`doctor --live` also reads Garmin through the saved session)
 - `version`
 
 Live Garmin write commands:
 
 - `workouts apply --apply`
-- `workouts upload-json`
-- `workouts delete`
-- `schedule create`
-- `schedule delete`
+- `workouts apply-batch --apply --yes`
+- `workouts reconcile --apply --yes`
+- `workouts upload-json --apply`
+- `workouts delete --apply`
+- `schedule create --apply`
+- `schedule delete --apply`
+
+Without `--apply`, these commands only print what would be sent.
 
 For live Garmin writes, show the user what will be sent and get confirmation first unless the user has already explicitly asked you to perform the write.
 
@@ -44,15 +47,13 @@ For live Garmin writes, show the user what will be sent and get confirmation fir
 
 - If a date is provided, `workouts apply --apply` schedules the workout on that date by default.
 - Use `--no-schedule` when the user wants the workout uploaded but not added to the calendar.
-- When recovery is missing, the planner uses conservative defaults for common running patterns:
-  - Strides: 60 seconds.
-  - Hill sprints or full recovery: 90 seconds.
-- If the recovery is important and ambiguous, ask the user before applying the workout.
-- Keep unstructured coaching notes in notes/description instead of inventing workout steps.
+- When recovery for strides or hill sprints is missing, the planner stops with a clarification question unless the user saved a matching preference (`preferences setup`). Ask the user rather than guessing.
+- `full recovery` without a duration becomes a Lap-button step.
+- Keep unstructured coaching notes in notes/description instead of inventing workout steps. Put them after `Note:` so they are never parsed as steps.
 
 ## Browser Auth
 
-`auth login-browser` opens visible Chrome. Subsequent workout writes use the saved Chrome profile headlessly.
+`auth login-browser` checks the saved login headlessly first and opens visible Chrome only when sign-in or MFA is needed. Subsequent workout reads and writes use the saved Chrome profile headlessly.
 
 If Garmin rejects a write with an auth error, run:
 

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,52 +11,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"garmin-connect-workout-cli/internal/config"
 	"garmin-connect-workout-cli/internal/garminsession"
 	"garmin-connect-workout-cli/internal/workoutdraft"
 )
-
-func TestHasGarminWriteAuth(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *config.Config
-		want bool
-	}{
-		{name: "nil config", cfg: nil, want: false},
-		{name: "empty config", cfg: &config.Config{}, want: false},
-		{name: "oauth header", cfg: &config.Config{AuthHeaderVal: "Bearer token"}, want: true},
-		{name: "cookie-only session uses browser write", cfg: &config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}}, want: false},
-		{name: "blank cookie header", cfg: &config.Config{Headers: map[string]string{"Cookie": "  "}}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := hasGarminWriteAuth(tt.cfg); got != tt.want {
-				t.Fatalf("hasGarminWriteAuth() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestUseGarminBrowserMutationSession(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *config.Config
-		want bool
-	}{
-		{name: "nil config", cfg: nil, want: true},
-		{name: "empty config", cfg: &config.Config{}, want: true},
-		{name: "direct oauth header", cfg: &config.Config{AuthHeaderVal: "Bearer token", AuthSource: "oauth2"}, want: false},
-		{name: "saved web authorization", cfg: &config.Config{AuthHeaderVal: "Bearer token", AuthSource: "garmin-web-session"}, want: true},
-		{name: "saved web cookie", cfg: &config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}, AuthSource: "garmin-web-session"}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := useGarminBrowserMutationSession(tt.cfg); got != tt.want {
-				t.Fatalf("useGarminBrowserMutationSession() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
 func TestGarminSavedSessionCookieParams(t *testing.T) {
 	session := garminsession.Session{Cookies: []garminsession.Cookie{
@@ -73,10 +31,10 @@ func TestGarminSavedSessionCookieParams(t *testing.T) {
 }
 
 func TestGarminConnectLocationRejectsSSORedirect(t *testing.T) {
-	if !isGarminConnectLocation("https://connect.garmin.com/app/workouts") {
+	if !isGarminConnectAppLocation("https://connect.garmin.com/app/workouts") {
 		t.Fatal("connect app location rejected")
 	}
-	if isGarminConnectLocation("https://sso.garmin.com/portal/sso/en-US/sign-in") {
+	if isGarminConnectAppLocation("https://sso.garmin.com/portal/sso/en-US/sign-in") {
 		t.Fatal("SSO redirect accepted as an authenticated Connect page")
 	}
 }
@@ -170,5 +128,29 @@ func TestNovelWorkoutsApplyBehavior(t *testing.T) {
 	}
 	if saved.UploadedWorkout != "42" || saved.ScheduledID != "99" || saved.ScheduledDate != draft.Date {
 		t.Fatalf("saved draft = %#v", saved)
+	}
+}
+
+func TestDeleteCommandsOnlyPreviewWithoutApply(t *testing.T) {
+	for _, args := range [][]string{
+		{"workouts", "delete", "1722206579", "--json"},
+		{"schedule", "delete", "1801324592", "--json"},
+		{"workouts", "delete", "1722206579", "--apply", "--dry-run", "--json"},
+	} {
+		cmd := RootCmd()
+		var out bytes.Buffer
+		cmd.SetArgs(args)
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		var preview map[string]any
+		if err := json.Unmarshal(out.Bytes(), &preview); err != nil {
+			t.Fatalf("%v: output %q: %v", args, out.String(), err)
+		}
+		if preview["dry_run"] != true || preview["method"] != "DELETE" {
+			t.Fatalf("%v: expected a DELETE preview, got %v", args, preview)
+		}
 	}
 }

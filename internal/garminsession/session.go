@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"garmin-connect-workout-cli/internal/cliutil"
-	"garmin-connect-workout-cli/internal/config"
 )
 
 const (
@@ -142,37 +141,6 @@ func ClearBrowserProfile() error {
 		return err
 	}
 	return nil
-}
-
-func Apply(cfg *config.Config) (*Session, string, bool, error) {
-	session, path, ok, err := Load()
-	if err != nil || !ok || cfg == nil {
-		return session, path, ok, err
-	}
-	if session.Expired(time.Now()) {
-		return session, path, ok, nil
-	}
-	if session.BaseURL != "" {
-		cfg.BaseURL = session.BaseURL
-	} else {
-		cfg.BaseURL = webBaseURL
-	}
-	if cfg.Headers == nil {
-		cfg.Headers = map[string]string{}
-	}
-	if session.Authorization != "" {
-		cfg.AuthHeaderVal = session.Authorization
-	}
-	if session.Cookie != "" {
-		cfg.Headers["Cookie"] = session.Cookie
-	}
-	if session.UserAgent != "" {
-		cfg.Headers["User-Agent"] = session.UserAgent
-	}
-	cfg.Headers["Referer"] = "https://connect.garmin.com/modern/workouts"
-	cfg.AuthSource = "garmin-web-session"
-	cfg.CredentialSource = path
-	return session, path, ok, nil
 }
 
 func (s *Session) Expired(now time.Time) bool {

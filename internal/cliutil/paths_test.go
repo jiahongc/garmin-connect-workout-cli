@@ -95,12 +95,12 @@ func TestKindDirPerKindEnvBeatsHomeEnv(t *testing.T) {
 	if got != data {
 		t.Fatalf("DataDir() = %q, want literal per-kind dir %q", got, data)
 	}
-	configDir, err := ConfigDir()
+	configDir, err := KindDir(PathKindConfig)
 	if err != nil {
-		t.Fatalf("ConfigDir() error = %v", err)
+		t.Fatalf("KindDir(config) error = %v", err)
 	}
 	if want := filepath.Join(root, "config"); configDir != want {
-		t.Fatalf("ConfigDir() = %q, want %q", configDir, want)
+		t.Fatalf("KindDir(config) = %q, want %q", configDir, want)
 	}
 }
 
@@ -190,12 +190,12 @@ func TestSetHomeOverrideExpandsTildeAndCleans(t *testing.T) {
 		t.Fatalf("SetHomeOverride() error = %v", err)
 	}
 	defer restore()
-	got, err := CacheDir()
+	got, err := DataDir()
 	if err != nil {
-		t.Fatalf("CacheDir() error = %v", err)
+		t.Fatalf("DataDir() error = %v", err)
 	}
-	if want := filepath.Join(home, "root", "cache"); got != want {
-		t.Fatalf("CacheDir() = %q, want %q", got, want)
+	if want := filepath.Join(home, "root", "data"); got != want {
+		t.Fatalf("DataDir() = %q, want %q", got, want)
 	}
 }
 

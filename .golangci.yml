@@ -7,8 +7,6 @@ linters:
     - unused
     - bodyclose
     - noctx
-    - rowserrcheck
-    - sqlclosecheck
 
 formatters:
   enable:

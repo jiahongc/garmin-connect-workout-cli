@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"garmin-connect-workout-cli/internal/workoutdraft"
+
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +15,7 @@ func newNovelWorkoutsSyncCheckCmd(flags *rootFlags) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:         "sync-check",
-		Short:       "Check whether a workout is uploaded, scheduled, and ready for normal Garmin device sync.",
+		Short:       "Check local history for whether a draft was uploaded and scheduled on its date.",
 		Example:     "  garmin-connect-workout-cli workouts sync-check --date 2026-07-01 --json",
 		Annotations: map[string]string{"agent:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,7 +42,7 @@ func newNovelWorkoutsSyncCheckCmd(flags *rootFlags) *cobra.Command {
 			}
 			ready := false
 			for _, draft := range matches {
-				if draft.UploadedWorkout != "" && (flagDate == "" || draft.ScheduledDate == flagDate || draft.Date == flagDate) {
+				if draftScheduledOn(draft, flagDate) {
 					ready = true
 					break
 				}
@@ -66,4 +67,10 @@ func newNovelWorkoutsSyncCheckCmd(flags *rootFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&flagDate, "date", "", "Schedule date in YYYY-MM-DD format")
 	return cmd
+}
+
+// draftScheduledOn reports whether an uploaded draft has a Garmin schedule
+// entry, on date when one is given.
+func draftScheduledOn(draft workoutdraft.Draft, date string) bool {
+	return draft.UploadedWorkout != "" && draft.ScheduledID != "" && (date == "" || draft.ScheduledDate == date)
 }

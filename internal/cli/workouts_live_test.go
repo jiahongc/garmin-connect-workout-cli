@@ -2,11 +2,7 @@
 
 package cli
 
-import (
-	"testing"
-
-	"garmin-connect-workout-cli/internal/config"
-)
+import "testing"
 
 func TestGarminWorkoutsListRequestUsesCollectionEndpoint(t *testing.T) {
 	path, params := garminWorkoutsListRequest(20)
@@ -47,15 +43,6 @@ func TestReplacementDoesNotCreateAnotherScheduleByDefault(t *testing.T) {
 	}
 	if got := resolveWorkoutSchedule("", false, "2026-07-16", ""); got != "2026-07-16" {
 		t.Fatalf("new workout schedule = %q, want draft date", got)
-	}
-}
-
-func TestGarminWorkoutReadUsesBrowserForCookieOnlySession(t *testing.T) {
-	if !useGarminBrowserRead(&config.Config{Headers: map[string]string{"Cookie": "SESSIONID=abc"}}) {
-		t.Fatal("cookie-only session should use the saved browser profile")
-	}
-	if useGarminBrowserRead(&config.Config{AuthHeaderVal: "Bearer token"}) {
-		t.Fatal("bearer session should use the direct API client")
 	}
 }
 

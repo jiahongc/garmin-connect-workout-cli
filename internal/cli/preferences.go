@@ -11,6 +11,7 @@ import (
 
 	"garmin-connect-workout-cli/internal/workoutdraft"
 	"garmin-connect-workout-cli/internal/workoutprefs"
+
 	"github.com/spf13/cobra"
 )
 

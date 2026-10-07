@@ -42,18 +42,27 @@ make build
 
 ## Login
 
-Use browser login. This keeps your Garmin password out of the terminal and lets Garmin handle MFA normally.
+Start with account setup. This keeps your Garmin password out of the terminal and lets Garmin handle MFA normally.
 
 ```bash
-garmin-connect-workout-cli auth login-browser
+garmin-connect-workout-cli auth setup --launch
 ```
 
 What happens:
 
-- The CLI opens a visible browser window (Chrome by default, or the configured Chromium-based browser).
-- You sign in to Garmin Connect and complete MFA there.
-- The CLI captures the signed-in browser session for later verified workout reads and writes.
-- The CLI saves a local Garmin web session for later workout uploads and schedule changes.
+- The CLI checks your saved login in the background first. If it works, no window opens.
+- If sign-in or MFA is needed, Chrome opens so you can complete it directly with Garmin.
+- The window closes automatically after verification. The CLI then checks that a fresh headless browser can reuse the login before reporting success.
+- Workout reads, uploads and scheduling reuse your saved login headlessly.
+
+`auth login-browser` uses the same login flow. `auth setup` without `--launch`
+prints the steps without opening a browser. With `--agent`, `--json` or
+`--no-input`, login can verify an existing session but never opens an interactive
+sign-in window; it gives the command to run if sign-in is needed.
+
+After connecting, optionally run `garmin-connect-workout-cli preferences setup`
+to set your recovery defaults. Then use `workouts plan` to preview a workout and
+`workouts apply <draft-id> --apply` to upload it. A dated draft is also scheduled.
 
 The command reports success only after a protected Garmin workout request returns
 authenticated JSON while the browser remains on Garmin Workouts. Reaching an SSO
@@ -65,13 +74,14 @@ session files; they contain the browser state needed for the next upload.
 
 The saved browser profile and session are local secrets. Do not share them.
 
-Check local auth state:
+Check local auth state, or confirm Garmin actually accepts the saved login:
 
 ```bash
 garmin-connect-workout-cli auth status
+garmin-connect-workout-cli doctor --live
 ```
 
-Clear the saved local browser profile:
+Clear the saved browser profile and web session:
 
 ```bash
 garmin-connect-workout-cli auth logout
@@ -238,10 +248,12 @@ garmin-connect-workout-cli workouts apply draft_abc123 \
 
 Without `--apply`, this prints the exact `PUT` path and Garmin payload without changing Garmin Connect. A replacement keeps the same workout ID and does not create another calendar schedule by default, so an existing scheduled workout remains linked. Pass `--schedule YYYY-MM-DD` only when you intentionally want to add another schedule entry.
 
-Delete one workout template:
+Delete one workout template or one calendar entry. Without `--apply` these only
+print the `DELETE` that would be sent:
 
 ```bash
-garmin-connect-workout-cli workouts delete 1620262629 --yes --json
+garmin-connect-workout-cli workouts delete 1620262629 --apply --json
+garmin-connect-workout-cli schedule delete 1801324592 --apply --json
 ```
 
 Add an existing workout to the Garmin calendar:
@@ -254,7 +266,7 @@ garmin-connect-workout-cli schedule create 1620262629 \
   --json
 ```
 
-Both commands are live Garmin writes. `workouts delete` removes the workout template; `schedule create` keeps the template and adds a calendar entry.
+With `--apply` these are live Garmin writes. `workouts delete` removes the workout template; `schedule create` keeps the template and adds a calendar entry.
 
 ## Reconcile A Workout Library
 
@@ -306,10 +318,13 @@ garmin-connect-workout-cli workouts plan "35min E + Drills + 4x20s strides with 
 Default title:
 
 ```text
-June 23: 35E + Drills + 4x20s strides
+June 23: 4x20s Strides
 ```
 
-Warmups and cooldowns are not emphasized in inferred titles. Extra text that is not a workout step is retained as notes instead of being silently discarded.
+The main quality block wins the title; warmups, cooldowns, easy running, and
+recovery jogs are not emphasized. Text that is not a workout step, such as
+`Drills`, is kept in the workout notes. Everything after `Note:` or `Notes:` is
+always kept as notes and never parsed into steps.
 
 You can always set the exact title:
 
@@ -329,6 +344,7 @@ Good inputs:
 30min easy + 6x10s hill sprint with full recovery
 10 min warmup, 6x800m at 5K pace with 2 min jog, 10 min cooldown
 10 min warmup, 4x1km at 4:30/km with 90 sec jog, 10 min cooldown
+2 mi warmup, 2x2 mi at GMP+5-10sec with 4 min easy jog, 3 mi cooldown. Note: about 6:52-6:58/mi by feel
 2mi easy warmup, 2 sets of (4 min at 10K effort, 60 sec float, 3 min at 5K effort, 60 sec float, 2 min at 3K effort) with 3 min jog between sets, 15 min cooldown
 ```
 
@@ -374,15 +390,16 @@ Agent safety rules:
 - Do not ask the user to paste a Garmin password into chat.
 - Use `auth login-browser` for login and MFA.
 - Treat `workouts plan` as safe: it only writes a local draft.
-- Treat `workouts apply`, `workouts upload-json`, `schedule create`, `schedule delete`, `workouts delete`, and `workouts reconcile --apply` as live Garmin writes.
+- Treat `workouts apply --apply`, `workouts upload-json --apply`, `schedule create --apply`, `schedule delete --apply`, `workouts delete --apply`, and `workouts reconcile --apply` as live Garmin writes.
 - Treat `workouts apply-batch --apply --yes` as a sequence of live Garmin writes; preview every item and get approval for the complete list first.
 - If the user gives a date, expect `workouts apply` to schedule the workout unless `--no-schedule` is used.
 
 ## Browser Behavior
 
-Login uses a visible browser because Garmin sign-in and MFA are interactive.
+Login checks the saved profile headlessly first. A visible browser is used only
+when Garmin sign-in or MFA is needed.
 
-Workout reads and writes are private Garmin Connect web API calls. The CLI uses a direct API token when available; otherwise it sends requests through the saved signed-in browser profile in a headless browser context. This is internal to the CLI and does not open a browser window during normal `workouts list`, `workouts get`, or `workouts apply` commands. To debug that session-backed path visibly:
+Workout reads and writes are private Garmin Connect web API calls. The CLI sends every request through the saved signed-in browser profile in a headless browser context; there is no password or API-token login. This is internal to the CLI and does not open a browser window during normal `workouts list`, `workouts get`, or `workouts apply` commands. To debug that session-backed path visibly:
 
 ```bash
 GARMIN_CONNECT_BROWSER_HEADLESS=0 garmin-connect-workout-cli workouts apply draft_abc123 --apply
@@ -413,5 +430,7 @@ make build
 
 Useful local files:
 
-- Draft history: `~/Library/Application Support/garmin-connect-workout-cli/workout-drafts.json` on macOS.
-- Browser profile: `~/Library/Application Support/garmin-connect-workout-cli/browser-profile` on macOS.
+- Draft history: `~/.local/share/garmin-connect-workout-cli/workout-drafts.json`.
+- Browser profile and web session: `~/.local/share/garmin-connect-workout-cli/browser-profile` and `garmin-web-session.json`.
+
+`auth status` and `doctor` print the exact paths in use.

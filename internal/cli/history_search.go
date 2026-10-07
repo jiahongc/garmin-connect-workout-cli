@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"garmin-connect-workout-cli/internal/workoutdraft"
+
 	"github.com/spf13/cobra"
 )
 
@@ -15,7 +16,7 @@ func newNovelHistorySearchCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:         "search [query]",
 		Short:       "Find prior authored workouts by prompt, pace target, interval shape, date, or Garmin ID.",
-		Example:     "  garmin-connect-workout-cli history search 800m --json --select workouts.name,workouts.date,workouts.garmin_id",
+		Example:     "  garmin-connect-workout-cli history search 800m --json --select workouts.name,workouts.date,workouts.uploaded_workout_id",
 		Annotations: map[string]string{"agent:read-only": "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dryRunOK(flags) {

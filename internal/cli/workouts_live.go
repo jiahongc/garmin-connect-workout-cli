@@ -3,18 +3,10 @@
 package cli
 
 import (
-	"context"
-	"encoding/json"
-	"io"
 	"net/url"
 
-	"garmin-connect-workout-cli/internal/client"
-	"garmin-connect-workout-cli/internal/config"
+	"github.com/spf13/cobra"
 )
-
-func useGarminBrowserRead(cfg *config.Config) bool {
-	return !hasGarminWriteAuth(cfg)
-}
 
 func garminBrowserReadPath(path string, params map[string]string) string {
 	values := url.Values{}
@@ -27,14 +19,29 @@ func garminBrowserReadPath(path string, params map[string]string) string {
 	return path
 }
 
-func resolveGarminWorkoutRead(ctx context.Context, c *client.Client, flags *rootFlags, isList bool, path string, params map[string]string, hintWriter io.Writer) (json.RawMessage, DataProvenance, error) {
-	if flags.dataSource == "local" || !useGarminBrowserRead(c.Config) {
-		return resolveReadWithStrategy(ctx, c, flags, "auto", "workouts", isList, path, params, nil, hintWriter)
+// newGarminReadCmd builds a read-only command that GETs one Garmin path
+// through the saved browser session and prints the JSON response.
+func newGarminReadCmd(flags *rootFlags, use, short, example, pathPrefix string) *cobra.Command {
+	return &cobra.Command{
+		Use:     use,
+		Short:   short,
+		Example: example,
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := pathPrefix
+			if len(args) == 1 {
+				path += url.PathEscape(args[0])
+			}
+			return runGarminRead(cmd, flags, path, nil, 0)
+		},
 	}
-	data, _, err := garminBrowserGetJSON(ctx, garminBrowserReadPath(path, params))
+}
+
+// runGarminRead GETs path through the saved browser session and prints the JSON response.
+func runGarminRead(cmd *cobra.Command, flags *rootFlags, path string, params map[string]string, limit int) error {
+	data, _, err := garminBrowserGetJSON(cmd.Context(), garminBrowserReadPath(path, params))
 	if err != nil {
-		return nil, DataProvenance{}, err
+		return classifyAPIError(err, flags)
 	}
-	writeThroughCache(ctx, "workouts", data)
-	return data, attachFreshness(DataProvenance{Source: "live", Reason: "browser_session"}, flags), nil
+	return printOutputWithFlags(cmd.OutOrStdout(), truncateJSONArray(data, limit), flags)
 }

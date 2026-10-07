@@ -79,7 +79,7 @@ func TestExitCode_UsageError_WrappedAsCode2(t *testing.T) {
 
 // TestFilterFields covers --select projection against the four payload
 // shapes CLIs see in practice: bare arrays, direct objects,
-// list envelopes (Stripe/GitHub/Notion-style wrapper + array), and
+// list envelopes (wrapper key + array, like history search output), and
 // flat objects. The envelope cases guard against a regression where
 // wrapper-key + array responses returned `{}` because the selector
 // heads matched the inner record fields, not the wrapper key.

@@ -86,39 +86,8 @@ func homeOverride() string {
 	return pathHomeOverride
 }
 
-func HomeOverrideActive() bool {
-	return homeOverride() != ""
-}
-
-func ConfigDir() (string, error) {
-	return KindDir(PathKindConfig)
-}
-
 func DataDir() (string, error) {
 	return KindDir(PathKindData)
-}
-
-func StateDir() (string, error) {
-	return KindDir(PathKindState)
-}
-
-func CacheDir() (string, error) {
-	return KindDir(PathKindCache)
-}
-
-func ReadFileWithLegacyFallback(primary, legacy string) ([]byte, string, error) {
-	data, err := os.ReadFile(primary)
-	if err == nil {
-		return data, primary, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) || legacy == "" || legacy == primary {
-		return nil, primary, err
-	}
-	data, legacyErr := os.ReadFile(legacy)
-	if legacyErr != nil {
-		return nil, legacy, legacyErr
-	}
-	return data, legacy, nil
 }
 
 func AtomicWritePrivateFile(path string, data []byte, fileMode, dirMode os.FileMode) error {
@@ -185,19 +154,6 @@ func ResolveKindDir(kind PathKind) (PathResolution, error) {
 		return PathResolution{}, err
 	}
 	return pathResolution(kind, filepath.Join(base, appName), "platform-default", "platform-default", ignored), nil
-}
-
-func AllPathResolutions() ([]PathResolution, error) {
-	kinds := []PathKind{PathKindConfig, PathKindData, PathKindState, PathKindCache}
-	resolutions := make([]PathResolution, 0, len(kinds))
-	for _, kind := range kinds {
-		resolution, err := ResolveKindDir(kind)
-		if err != nil {
-			return nil, err
-		}
-		resolutions = append(resolutions, resolution)
-	}
-	return resolutions, nil
 }
 
 func pathResolution(kind PathKind, dir, rung, source string, ignored []PathIgnoredOverride) PathResolution {

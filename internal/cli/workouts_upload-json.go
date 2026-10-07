@@ -6,216 +6,70 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 )
 
 func newWorkoutsUploadJsonCmd(flags *rootFlags) *cobra.Command {
-	var bodyWorkoutJson string
+	var workoutJSON string
 	var stdinBody bool
 	var apply bool
-
 	cmd := &cobra.Command{
-		Use:         "upload-json",
-		Short:       "Upload a raw Garmin workout JSON payload",
-		Example:     "  garmin-connect-workout-cli workouts upload-json --workout-json '{}' --apply",
-		Annotations: map[string]string{"api:endpoint": "workouts.upload-json", "api:method": "POST", "api:path": "/workout-service/workout"},
+		Use:     "upload-json",
+		Short:   "Upload a raw Garmin workout JSON payload",
+		Example: "  garmin-connect-workout-cli workouts upload-json --workout-json '{...}' --apply",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Bare invocation of a command with required input prints help
-			// instead of pflag's terse "required flag not set" error. Optional-
-			// only read commands fall through so a bare call still executes.
-			if cmd.Flags().NFlag() == 0 && len(args) == 0 && !flags.dryRun {
-				return cmd.Help()
+			if workoutJSON == "" && !stdinBody {
+				return usageErr(fmt.Errorf("pass --workout-json or --stdin"))
 			}
-			if !stdinBody {
-				if !cmd.Flags().Changed("workout-json") && !flags.dryRun {
-					return fmt.Errorf("required flag \"%s\" not set", "workout-json")
-				}
-			}
-			c, err := flags.newClient()
+			body, err := readJSONObject(cmd, workoutJSON, stdinBody)
 			if err != nil {
 				return err
 			}
-
-			path := "/workout-service/workout"
-			params := map[string]string{}
-			var body map[string]any
-			if stdinBody {
-				stdinData, err := io.ReadAll(os.Stdin)
-				if err != nil {
-					return fmt.Errorf("reading stdin: %w", err)
-				}
-				var jsonBody map[string]any
-				if err := json.Unmarshal(stdinData, &jsonBody); err != nil {
-					return fmt.Errorf("parsing stdin JSON: %w", err)
-				}
-				body = jsonBody
-			} else {
-				body = map[string]any{}
-				if bodyWorkoutJson != "" {
-					var parsedWorkoutJson any
-					if err := json.Unmarshal([]byte(bodyWorkoutJson), &parsedWorkoutJson); err != nil {
-						return fmt.Errorf("parsing --workout-json JSON: %w", err)
-					}
-					if parsedMap, ok := parsedWorkoutJson.(map[string]any); ok {
-						body = parsedMap
-					} else {
-						return usageErr(fmt.Errorf("--workout-json must be a JSON object"))
-					}
-				}
-			}
-			if !apply {
-				envelope := map[string]any{
-					"dry_run":        true,
-					"apply":          false,
-					"path":           path,
-					"garmin_payload": body,
-					"next":           "rerun with --apply to upload this raw workout JSON",
-				}
-				return printJSONOrHuman(cmd, flags, envelope, "Dry run only. Rerun with --apply to upload this workout JSON.\n")
-			}
-			_ = c
-			_ = params
-			data, statusCode, err := postGarminWorkout(cmd, flags, path, body)
-			if err != nil {
-				return classifyAPIError(err, flags)
-			}
-			// Inspect the mutate response body for a partial-failure-shaped
-			// field (e.g. Google Ads `partialFailureError`). Several Google
-			// APIs return 200 OK with a partial-failure field when some
-			// operations in the batch failed; ignoring it silently swallows
-			// real failures. Detection runs before output-mode selection so
-			// the exit code is consistent regardless of how stdout is
-			// rendered. --dry-run short-circuits because no real request
-			// was sent.
-			var partialFailure *partialFailureReport
-			if !flags.dryRun && statusCode >= 200 && statusCode < 300 {
-				partialFailure = detectPartialFailure(data)
-				if partialFailure != nil {
-					fmt.Fprintf(os.Stderr, "warning: partial failure detected in %s response: %s\n", "workouts", partialFailure.Message)
-					if len(partialFailure.ResourceNames) > 0 {
-						fmt.Fprintf(os.Stderr, "         succeeded: %d operation(s)\n", len(partialFailure.ResourceNames))
-					}
-				}
-			}
-			if !flags.dryRun && statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure) {
-				writeMutationResponseToStore(cmd.Context(), "workouts", data, "")
-			}
-			if wantsHumanTable(cmd.OutOrStdout(), flags) {
-				// Check if response contains an array (directly or wrapped in "data")
-				var items []map[string]any
-				if json.Unmarshal(data, &items) == nil && len(items) > 0 {
-					if err := printAutoTable(cmd.OutOrStdout(), items); err != nil {
-						fmt.Fprintf(os.Stderr, "warning: table rendering failed, falling back to JSON: %v\n", err)
-					} else {
-						if partialFailure != nil && !flags.allowPartialFailure {
-							return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "workouts", partialFailure.Message))
-						}
-						return nil
-					}
-				} else {
-					var wrapped struct {
-						Data []map[string]any `json:"data"`
-					}
-					if json.Unmarshal(data, &wrapped) == nil && len(wrapped.Data) > 0 {
-						if err := printAutoTable(cmd.OutOrStdout(), wrapped.Data); err != nil {
-							fmt.Fprintf(os.Stderr, "warning: table rendering failed, falling back to JSON: %v\n", err)
-						} else {
-							if partialFailure != nil && !flags.allowPartialFailure {
-								return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "workouts", partialFailure.Message))
-							}
-							return nil
-						}
-					}
-				}
-			}
-			if flags.asJSON || (!isTerminal(cmd.OutOrStdout()) && !flags.csv && !flags.quiet && !flags.plain) {
-				if flags.quiet {
-					if partialFailure != nil && !flags.allowPartialFailure {
-						return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "workouts", partialFailure.Message))
-					}
-					return nil
-				}
-				envelope := map[string]any{
-					"action":   "post",
-					"resource": "workouts",
-					"path":     path,
-					"status":   statusCode,
-					"success":  statusCode >= 200 && statusCode < 300 && (partialFailure == nil || flags.allowPartialFailure),
-				}
-				if partialFailure != nil {
-					envelope["partial_failure"] = partialFailure
-				}
-				if flags.dryRun {
-					envelope["dry_run"] = true
-					envelope["status"] = 0
-					envelope["success"] = false
-				}
-				// Verify-mode synthetic envelope detection runs against RAW data
-				// (before --compact/--select filtering) so the sentinel field is
-				// guaranteed to be visible even if the operator passes a filter
-				// flag that would otherwise strip it. Surfaces a top-level
-				// verify_noop signal + flips success to false. Mirrors the dry_run
-				// shape above.
-				if len(data) > 0 {
-					var rawParsed any
-					if err := json.Unmarshal(data, &rawParsed); err == nil {
-						if m, ok := rawParsed.(map[string]any); ok {
-							if v, ok := m["__pp_verify_synthetic__"].(bool); ok && v {
-								envelope["verify_noop"] = true
-								envelope["success"] = false
-							}
-						}
-					}
-				}
-				// Apply --compact and --select to the API response before wrapping.
-				// --select wins when both are set: explicit field choice trumps the
-				// generic high-gravity allow-list. Otherwise --compact still applies
-				// when --agent is on but the user did not name fields.
-				filtered := data
-				if flags.selectFields != "" {
-					filtered = filterFields(filtered, flags.selectFields)
-				} else if flags.compact {
-					filtered = compactFields(filtered)
-				}
-				if len(filtered) > 0 {
-					var parsed any
-					if err := json.Unmarshal(filtered, &parsed); err == nil {
-						envelope["data"] = parsed
-					}
-				}
-				envelopeJSON, err := json.Marshal(envelope)
-				if err != nil {
-					return err
-				}
-				if perr := printOutput(cmd.OutOrStdout(), json.RawMessage(envelopeJSON), true); perr != nil {
-					return perr
-				}
-				if partialFailure != nil && !flags.allowPartialFailure {
-					return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "workouts", partialFailure.Message))
-				}
-				return nil
-			}
-			// Fall-through for mutate paths that did not hit the table or
-			// asJSON branches: --quiet, --csv, --plain, and default terminal
-			// raw output. printOutputWithFlags renders the body, then the
-			// typed partial-failure exit fires unless --allow-partial-failure
-			// downgrades it. Without this guard a partial failure would exit
-			// 0 for these output modes — the exact silent-swallow regression
-			// the surrounding patch is preventing for asJSON / piped output.
-			if perr := printOutputWithFlags(cmd.OutOrStdout(), data, flags); perr != nil {
-				return perr
-			}
-			if partialFailure != nil && !flags.allowPartialFailure {
-				return partialFailureErr(fmt.Errorf("partial failure in %s response: %s", "workouts", partialFailure.Message))
-			}
-			return nil
+			return runGarminWrite(cmd, flags, apply, "/workout-service/workout", "garmin_payload", body, "upload this raw workout JSON")
 		},
 	}
-	cmd.Flags().StringVar(&bodyWorkoutJson, "workout-json", "", "Raw Garmin workout JSON object")
+	cmd.Flags().StringVar(&workoutJSON, "workout-json", "", "Raw Garmin workout JSON object")
 	cmd.Flags().BoolVar(&stdinBody, "stdin", false, "Read request body as JSON from stdin")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Actually upload the raw workout JSON to Garmin Connect")
-
 	return cmd
+}
+
+// readJSONObject parses raw, or stdin when fromStdin is set, as a JSON object.
+func readJSONObject(cmd *cobra.Command, raw string, fromStdin bool) (map[string]any, error) {
+	data := []byte(raw)
+	if fromStdin {
+		var err error
+		if data, err = io.ReadAll(cmd.InOrStdin()); err != nil {
+			return nil, fmt.Errorf("reading stdin: %w", err)
+		}
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, usageErr(fmt.Errorf("parsing request JSON: %w", err))
+	}
+	if body == nil {
+		return nil, usageErr(fmt.Errorf("request body must be a JSON object"))
+	}
+	return body, nil
+}
+
+// runGarminWrite previews the POST by default and sends it through the
+// browser session only with --apply.
+func runGarminWrite(cmd *cobra.Command, flags *rootFlags, apply bool, path, bodyKey string, body map[string]any, action string) error {
+	if !apply || flags.dryRun {
+		preview := map[string]any{"dry_run": true, "apply": false, "method": "POST", "path": path, bodyKey: body, "next": "rerun with --apply to " + action}
+		return printJSONOrHuman(cmd, flags, preview, "Dry run only. Rerun with --apply to "+action+".\n")
+	}
+	data, statusCode, err := postGarminWorkout(cmd, flags, path, body)
+	if err != nil {
+		return classifyAPIError(err, flags)
+	}
+	result := map[string]any{"path": path, "status": statusCode, "success": true}
+	var parsed any
+	if json.Unmarshal(data, &parsed) == nil {
+		result["data"] = parsed
+	}
+	return printJSONOrHuman(cmd, flags, result, fmt.Sprintf("Done: POST %s (HTTP %d).\n", path, statusCode))
 }

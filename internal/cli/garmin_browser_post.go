@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +13,11 @@ import (
 	"time"
 
 	"garmin-connect-workout-cli/internal/garminsession"
+
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -127,37 +128,90 @@ func runGarminBrowserWithSession(
 	defer cancel()
 	browserCtx, timeoutCancel := context.WithTimeout(browserCtx, timeout)
 	defer timeoutCancel()
+	defer closeGarminBrowser(browserCtx)
 
 	actions := []chromedp.Action{network.Enable()}
-	if cookies := garminSavedSessionCookieParams(webSession); len(cookies) > 0 {
-		actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
-			return network.SetCookies(cookies).Do(ctx)
-		}))
-	}
-	var location string
-	actions = append(actions, chromedp.Navigate("https://connect.garmin.com/app/workouts"), chromedp.Location(&location))
 	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
-		if !isGarminConnectLocation(location) {
-			return authErr(fmt.Errorf("saved Garmin session redirected to %s; run auth login-browser once", location))
+		current, err := storage.GetCookies().Do(ctx)
+		if err != nil {
+			return err
+		}
+		if cookies := garminMissingSessionCookieParams(webSession, current); len(cookies) > 0 {
+			return network.SetCookies(cookies).Do(ctx)
+		}
+		return nil
+	}))
+	actions = append(actions, chromedp.Navigate("https://connect.garmin.com/app/workouts"))
+	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+		if err := waitForGarminApp(ctx); err != nil {
+			return err
 		}
 		return action(ctx)
 	}))
 	return garminBrowserProfileError(chromedp.Run(browserCtx, actions...))
 }
 
+// Close gracefully so refreshed cookies and local storage reach the profile
+// before the next command starts another browser.
+func closeGarminBrowser(ctx context.Context) {
+	closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = chromedp.Cancel(closeCtx)
+}
+
+func waitForGarminApp(ctx context.Context) error {
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		location, err := browserLocation(ctx)
+		if err != nil && !isTransientChromeContextError(err) {
+			return err
+		}
+		if isGarminConnectAppLocation(location) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			if strings.HasPrefix(location, "https://sso.garmin.com/") {
+				return authErr(fmt.Errorf("Garmin sign-in is required; run auth login-browser to sign in and complete MFA in Chrome"))
+			}
+			return fmt.Errorf("Garmin Workouts did not finish loading; retry when Garmin is available")
+		case <-ticker.C:
+		}
+	}
+}
+
 func garminBrowserProfileError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "opening in existing browser session") {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "opening in existing browser session") || strings.Contains(message, "processsingleton") || strings.Contains(message, "singletonlock") {
 		return fmt.Errorf("Garmin browser profile is already open. Close only the dedicated Garmin Connect browser window, then rerun the command; do not delete the saved profile or session: %w", err)
 	}
 	return err
 }
 
-func isGarminConnectLocation(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	return err == nil && parsed.Scheme == "https" && parsed.Host == "connect.garmin.com"
+func garminMissingSessionCookieParams(session garminsession.Session, current []*network.Cookie) []*network.CookieParam {
+	params := garminSavedSessionCookieParams(session)
+	missing := params[:0]
+	for _, param := range params {
+		found := false
+		for _, cookie := range current {
+			if cookie != nil && cookie.Name == param.Name && cookie.Domain == param.Domain && cookie.Path == param.Path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, param)
+		}
+	}
+	return missing
 }
 
 func garminSavedSessionCookieParams(session garminsession.Session) []*network.CookieParam {

@@ -3,8 +3,6 @@
 package cli
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,14 +17,12 @@ import (
 	"time"
 
 	"garmin-connect-workout-cli/internal/cliutil"
-	"garmin-connect-workout-cli/internal/config"
 	"garmin-connect-workout-cli/internal/garminsession"
+
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
-	garmin "github.com/llehouerou/go-garmin"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 func newAuthCmd(flags *rootFlags) *cobra.Command {
@@ -37,109 +33,10 @@ func newAuthCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.AddCommand(newAuthSetupCmd(flags))
-	cmd.AddCommand(newAuthLoginCmd(flags))
 	cmd.AddCommand(newAuthLoginBrowserCmd(flags))
 	cmd.AddCommand(newAuthStatusCmd(flags))
-	cmd.AddCommand(newAuthSetTokenCmd(flags))
 	cmd.AddCommand(newAuthLogoutCmd(flags))
 
-	return cmd
-}
-
-func newAuthLoginCmd(flags *rootFlags) *cobra.Command {
-	var email string
-	var passwordStdin bool
-	var mfaCode string
-	cmd := &cobra.Command{
-		Use:     "login",
-		Short:   "Login to Garmin Connect without storing the raw password",
-		Example: "  garmin-connect-workout-cli auth login\n  printf '%s' \"$GARMIN_PASSWORD\" | garmin-connect-workout-cli auth login --email you@example.com --password-stdin --mfa-code 123456",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 && cmd.Flags().NFlag() == 0 {
-				if flags.noInput || flags.agent || flags.asJSON || !stdinIsTerminal() {
-					return cmd.Help()
-				}
-			}
-			if strings.TrimSpace(email) == "" {
-				if flags.noInput || flags.agent || flags.asJSON || !stdinIsTerminal() || passwordStdin {
-					return usageErr(fmt.Errorf("--email is required"))
-				}
-				promptedEmail, err := promptLine(cmd, "Garmin email: ")
-				if err != nil {
-					return err
-				}
-				email = strings.TrimSpace(promptedEmail)
-			}
-			if email == "" {
-				return usageErr(fmt.Errorf("--email is required"))
-			}
-			password, err := readGarminPassword(cmd, flags, passwordStdin)
-			if err != nil {
-				return err
-			}
-			ctx, cancel := boundCtx(cmd.Context(), flags)
-			defer cancel()
-			fmt.Fprintln(cmd.ErrOrStderr(), "Submitting Garmin login...")
-			gc := garmin.New(garmin.Options{
-				MFAHandler: func() (string, error) {
-					if mfaCode == "" {
-						if flags.noInput || flags.agent || flags.asJSON || passwordStdin || !stdinIsTerminal() {
-							return "", fmt.Errorf("MFA required; rerun with --mfa-code")
-						}
-						fmt.Fprintln(cmd.ErrOrStderr(), "Garmin requested MFA. Check your Garmin-approved method, then enter the code.")
-						code, err := promptLine(cmd, "MFA code: ")
-						if err != nil {
-							return "", err
-						}
-						return strings.TrimSpace(code), nil
-					}
-					return mfaCode, nil
-				},
-			})
-			if err := gc.Login(ctx, email, password); err != nil {
-				return authErr(fmt.Errorf("garmin login failed: %w", err))
-			}
-			var session bytes.Buffer
-			if err := gc.SaveSession(&session); err != nil {
-				return configErr(fmt.Errorf("reading Garmin session: %w", err))
-			}
-			var token struct {
-				AccessToken  string    `json:"oauth2_access_token"`
-				RefreshToken string    `json:"oauth2_refresh_token"`
-				Expiry       time.Time `json:"oauth2_expiry"`
-			}
-			if err := json.Unmarshal(session.Bytes(), &token); err != nil {
-				return configErr(fmt.Errorf("parsing Garmin session: %w", err))
-			}
-			if token.AccessToken == "" {
-				return authErr(fmt.Errorf("Garmin login succeeded but no OAuth2 access token was returned"))
-			}
-			cfg, err := config.Load(flags.configPath)
-			if err != nil {
-				return configErr(err)
-			}
-			cfg.AuthHeaderVal = ""
-			if err := cfg.SaveTokens("", "", token.AccessToken, token.RefreshToken, token.Expiry); err != nil {
-				return configErr(fmt.Errorf("saving Garmin session token: %w", err))
-			}
-			out := map[string]any{
-				"authenticated": true,
-				"config_path":   cfg.Path,
-				"expires_at":    token.Expiry,
-			}
-			if flags.asJSON || flags.agent {
-				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Garmin token saved to %s\n", credentialSavePath(cfg))
-			if !token.Expiry.IsZero() {
-				fmt.Fprintf(cmd.OutOrStdout(), "Expires: %s\n", token.Expiry.Format(time.RFC3339))
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&email, "email", "", "Garmin Connect email address")
-	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "Read Garmin password from stdin for scripts")
-	cmd.Flags().StringVar(&mfaCode, "mfa-code", "", "MFA code when Garmin requires one")
 	return cmd
 }
 
@@ -149,15 +46,12 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login-browser",
 		Short: "Login through Garmin Connect in a browser",
-		Long:  "Opens a visible browser window. Sign in to Garmin Connect there; the CLI verifies the signed-in browser profile and saves a local Garmin web session for later workout writes.",
+		Long:  "Checks the saved Garmin login headlessly. Opens Chrome only if sign-in or MFA is needed, then verifies that a fresh headless session can access workouts before reporting success.",
 		Example: strings.Join([]string{
 			"  garmin-connect-workout-cli auth login-browser",
 			"  garmin-connect-workout-cli auth login-browser --timeout 5m",
 		}, "\n"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if flags.noInput || flags.agent || flags.asJSON {
-				return usageErr(fmt.Errorf("auth login-browser requires an interactive terminal"))
-			}
 			if timeout <= 0 {
 				return usageErr(fmt.Errorf("--timeout must be positive"))
 			}
@@ -178,11 +72,27 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 				return configErr(fmt.Errorf("securing browser profile dir: %w", err))
 			}
 
-			fmt.Fprintln(cmd.ErrOrStderr(), "Opening a browser for Garmin Connect login.")
-			fmt.Fprintln(cmd.ErrOrStderr(), "Sign in and complete MFA in the browser. Leave this terminal open.")
-			session, err := verifyGarminBrowserProfile(cmd.Context(), profileDir, timeout)
+			saved, _, _, err := garminsession.Load()
 			if err != nil {
-				return authErr(err)
+				return configErr(err)
+			}
+			var restore garminsession.Session
+			if saved != nil {
+				restore = *saved
+			}
+			interactive := !flags.noInput && !flags.agent && !flags.asJSON
+			session, err := ensureGarminBrowserSession(cmd.ErrOrStderr(), interactive, func(headless bool) (garminsession.Session, error) {
+				if headless {
+					return verifySavedGarminBrowserProfile(cmd.Context(), profileDir, restore, timeout)
+				}
+				fresh, err := verifyGarminBrowserProfile(cmd.Context(), profileDir, timeout)
+				if err == nil {
+					restore = fresh
+				}
+				return fresh, err
+			})
+			if err != nil {
+				return err
 			}
 			sessionPath, err := garminsession.Save(session)
 			if err != nil {
@@ -197,8 +107,9 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 			if flags.asJSON || flags.agent {
 				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Garmin browser profile is signed in.")
-			fmt.Fprintln(cmd.OutOrStdout(), "Garmin web session saved for workout writes.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Garmin is ready. Saved login verified in a fresh headless browser.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Workout commands will reuse this login without opening Chrome.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Next: garmin-connect-workout-cli preferences setup (optional recovery defaults).")
 			fmt.Fprintf(cmd.OutOrStdout(), "Browser profile: %s\n", profileDir)
 			fmt.Fprintf(cmd.OutOrStdout(), "Web session: %s\n", sessionPath)
 			return nil
@@ -207,6 +118,62 @@ func newAuthLoginBrowserCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Maximum time to wait for browser login")
 	cmd.Flags().StringVar(&profileDir, "profile-dir", "", "Browser profile directory for Garmin login cookies")
 	return cmd
+}
+
+func ensureGarminBrowserSession(w io.Writer, interactive bool, verify func(headless bool) (garminsession.Session, error)) (garminsession.Session, error) {
+	fmt.Fprintln(w, "Checking your saved Garmin login in the background...")
+	session, err := verify(true)
+	if err == nil || ExitCode(err) != 4 {
+		return session, err
+	}
+	if !interactive {
+		return garminsession.Session{}, authErr(fmt.Errorf("Garmin sign-in is required. Run garmin-connect-workout-cli auth login-browser without --agent, --json or --no-input to sign in and complete MFA in Chrome"))
+	}
+	fmt.Fprintln(w, "Opening Chrome for Garmin sign-in. Enter your password and MFA only in that window.")
+	fmt.Fprintln(w, "The window closes automatically after verification; then we check that your saved login works in the background.")
+	if _, err := verify(false); err != nil {
+		return garminsession.Session{}, err
+	}
+	fmt.Fprintln(w, "Checking that your login survives closing Chrome...")
+	session, err = verify(true)
+	if err != nil {
+		return garminsession.Session{}, fmt.Errorf("Garmin login could not be reused after Chrome closed; setup is not complete: %w", err)
+	}
+	return session, nil
+}
+
+func verifySavedGarminBrowserProfile(ctx context.Context, profileDir string, saved garminsession.Session, timeout time.Duration) (garminsession.Session, error) {
+	if _, err := os.Stat(filepath.Join(profileDir, "Default", "Cookies")); os.IsNotExist(err) {
+		return garminsession.Session{}, authErr(fmt.Errorf("no saved Garmin browser login"))
+	} else if err != nil {
+		return garminsession.Session{}, err
+	}
+	var session garminsession.Session
+	err := runGarminBrowserWithSession(ctx, profileDir, saved, true, timeout, func(browserCtx context.Context) error {
+		capture := &webSessionCapture{}
+		startGarminSessionCapture(browserCtx, capture)
+		if err := newGarminBrowserMutationSession(browserCtx).discoverBase(); err != nil {
+			return err
+		}
+		location, err := browserLocation(browserCtx)
+		if err != nil {
+			return err
+		}
+		if !isGarminConnectAppLocation(location) {
+			return authErr(fmt.Errorf("Garmin redirected away from Workouts after verification"))
+		}
+		captured, ok, err := currentCapturedSession(browserCtx, capture)
+		if err != nil {
+			return err
+		}
+		if !ok || !sessionCandidateActive(captured) {
+			return authErr(fmt.Errorf("no reusable Garmin session was captured"))
+		}
+		captured.VerifiedAt = time.Now()
+		session = captured
+		return nil
+	})
+	return session, err
 }
 
 func verifyGarminBrowserProfile(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
@@ -229,6 +196,7 @@ func verifyGarminBrowserProfileWithAction(parent context.Context, profileDir str
 	defer cancel()
 	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
+	defer closeGarminBrowser(ctx)
 
 	capture := &webSessionCapture{}
 	startGarminSessionCapture(ctx, capture)
@@ -377,10 +345,6 @@ func captureGarminSessionHeaders(capture *webSessionCapture, headers network.Hea
 	}
 }
 
-func captureGarminWebSession(parent context.Context, profileDir string, timeout time.Duration) (garminsession.Session, error) {
-	return verifyGarminBrowserProfile(parent, profileDir, timeout)
-}
-
 func browserLocation(ctx context.Context) (string, error) {
 	var location string
 	if err := chromedp.Run(ctx, chromedp.Location(&location)); err != nil {
@@ -406,10 +370,15 @@ func currentCapturedSession(ctx context.Context, capture *webSessionCapture) (ga
 			}
 		}
 	}
-	cookies, err := storage.GetCookies().Do(ctx)
-	if err == nil && len(cookies) == 0 {
-		cookies, err = network.GetCookies().Do(ctx)
-	}
+	var cookies []*network.Cookie
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+		var err error
+		cookies, err = storage.GetCookies().Do(actionCtx)
+		if err == nil && len(cookies) == 0 {
+			cookies, err = network.GetCookies().Do(actionCtx)
+		}
+		return err
+	}))
 	if err != nil {
 		if auth != "" || capturedCookie != "" {
 			return garminsession.Session{
@@ -594,219 +563,79 @@ func isTransientChromeContextError(err error) bool {
 	return strings.Contains(msg, "invalid context") || strings.Contains(msg, "context canceled")
 }
 
-func readGarminPassword(cmd *cobra.Command, flags *rootFlags, passwordStdin bool) (string, error) {
-	if passwordStdin {
-		passwordBytes, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return "", fmt.Errorf("reading password from stdin: %w", err)
-		}
-		password := strings.TrimRight(string(passwordBytes), "\r\n")
-		if password == "" {
-			return "", usageErr(fmt.Errorf("password stdin was empty"))
-		}
-		return password, nil
-	}
-	if flags.noInput || flags.agent || flags.asJSON {
-		return "", usageErr(fmt.Errorf("--password-stdin is required in non-interactive mode"))
-	}
-	if !stdinIsTerminal() {
-		return "", usageErr(fmt.Errorf("--password-stdin is required when stdin is not a terminal"))
-	}
-	fmt.Fprint(cmd.ErrOrStderr(), "Garmin password (hidden): ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(cmd.ErrOrStderr())
-	if err != nil {
-		return "", fmt.Errorf("reading hidden password: %w", err)
-	}
-	password := strings.TrimRight(string(passwordBytes), "\r\n")
-	if password == "" {
-		return "", usageErr(fmt.Errorf("password was empty"))
-	}
-	return password, nil
-}
-
-func promptLine(cmd *cobra.Command, label string) (string, error) {
-	fmt.Fprint(cmd.ErrOrStderr(), label)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-func stdinIsTerminal() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
-
-// newAuthSetupCmd prints concrete steps for getting a credential. Side-effect
-// rule: print by default, --launch opt-in to open the URL, short-circuit when
-// the verifier is running this in a sandboxed subprocess.
-func newAuthSetupCmd(_ *rootFlags) *cobra.Command {
+func newAuthSetupCmd(flags *rootFlags) *cobra.Command {
 	var launch bool
 	cmd := &cobra.Command{
 		Use:     "setup",
-		Short:   "Print steps for obtaining a credential (use --launch to open the URL)",
+		Short:   "Get started with Garmin (use --launch to connect your account)",
 		Example: "  garmin-connect-workout-cli auth setup\n  garmin-connect-workout-cli auth setup --launch",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			w := cmd.OutOrStdout()
-			fmt.Fprintln(w, "Use browser login for Garmin Connect.")
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "Run:")
-			fmt.Fprintln(w, "  garmin-connect-workout-cli auth login-browser")
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, "That opens a browser so Garmin handles password and MFA directly.")
-			if !launch {
-				return nil
+			if launch {
+				login := newAuthLoginBrowserCmd(flags)
+				return login.RunE(cmd, nil)
 			}
-			fmt.Fprintln(cmd.ErrOrStderr(), "no setup URL configured; cannot launch")
+			w := cmd.OutOrStdout()
+			fmt.Fprintln(w, "1. Connect Garmin: garmin-connect-workout-cli auth setup --launch")
+			fmt.Fprintln(w, "   Chrome opens only when sign-in or MFA is needed. Passwords stay in Garmin.")
+			fmt.Fprintln(w, "   The window closes automatically; saved login is then verified headlessly.")
+			fmt.Fprintln(w, "2. Optional recovery defaults: garmin-connect-workout-cli preferences setup")
+			fmt.Fprintln(w, "3. Preview a workout: garmin-connect-workout-cli workouts plan \"2mi warmup, 6x400m at mile effort with full recovery\" --date YYYY-MM-DD")
+			fmt.Fprintln(w, "4. Upload and schedule: garmin-connect-workout-cli workouts apply <draft-id> --apply")
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&launch, "launch", false, "Open the setup URL in your default browser")
+	cmd.Flags().BoolVar(&launch, "launch", false, "Connect Garmin, opening Chrome only if sign-in is needed")
 	return cmd
 }
 
 func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:     "status",
-		Short:   "Show authentication status",
+		Short:   "Show the saved Garmin login (local check; use doctor --live to verify with Garmin)",
 		Example: "  garmin-connect-workout-cli auth status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(flags.configPath)
+			session, sessionPath, found, err := garminsession.Load()
 			if err != nil {
 				return configErr(err)
 			}
-			webSession, webSessionPath, webSessionFound, err := garminsession.Apply(cfg)
+			profilePath, profileReady, err := garminsession.BrowserProfileReady()
 			if err != nil {
 				return configErr(err)
 			}
-			browserProfilePath, browserProfileReady, err := garminsession.BrowserProfileReady()
-			if err != nil {
-				return configErr(err)
-			}
-
-			w := cmd.OutOrStdout()
-			header := cfg.AuthHeader()
-			authed := header != "" || (webSessionFound && webSession.Active(time.Now()))
-			// JSON envelope: {authenticated, verified, source, config}. When not
-			// authenticated, write the envelope first then return authErr
-			// so exit code carries the auth-failure signal.
+			authed := profileReady && found && session.Active(time.Now())
 			if flags.asJSON {
 				out := map[string]any{
-					"authenticated": authed,
-					"verified":      false,
-					"source":        cfg.AuthSource,
-					"config":        cfg.Path,
-					"browser_profile": map[string]any{
-						"path":  browserProfilePath,
-						"ready": browserProfileReady,
-					},
+					"authenticated":   authed,
+					"verified":        false,
+					"browser_profile": map[string]any{"path": profilePath, "ready": profileReady},
 				}
-				if webSessionFound {
-					out["web_session_path"] = webSessionPath
-					out["web_session_active"] = webSession.Active(time.Now())
-					out["web_session_base_url"] = webSession.BaseURL
-					out["web_session_captured_at"] = webSession.CapturedAt
+				if found {
+					out["web_session_path"] = sessionPath
+					out["web_session_active"] = session.Active(time.Now())
+					out["web_session_captured_at"] = session.CapturedAt
 				}
-				if printErr := printJSONFiltered(w, out, flags); printErr != nil {
-					return printErr
+				if err := printJSONFiltered(cmd.OutOrStdout(), out, flags); err != nil {
+					return err
 				}
-				if !authed {
-					return authErr(fmt.Errorf("no credentials configured"))
-				}
-				return nil
+			} else if authed {
+				fmt.Fprintf(cmd.OutOrStdout(), "Saved Garmin login present (not verified)\n  Web session: %s\n  Browser profile: %s\n", sessionPath, profilePath)
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Not authenticated. Run: garmin-connect-workout-cli auth login-browser")
 			}
 			if !authed {
-				fmt.Fprintln(w, red("Not authenticated"))
-				fmt.Fprintln(w, "")
-				fmt.Fprintln(w, "Login through Garmin Connect in a browser:")
-				fmt.Fprintf(w, "  garmin-connect-workout-cli auth login-browser\n")
-				return authErr(fmt.Errorf("no credentials configured"))
-			}
-
-			fmt.Fprintln(w, green("Credentials present (not verified)"))
-			fmt.Fprintf(w, "  Source: %s\n", cfg.AuthSource)
-			fmt.Fprintf(w, "  Config: %s\n", cfg.Path)
-			if webSessionFound {
-				fmt.Fprintf(w, "  Web session: %s\n", webSessionPath)
-			}
-			if browserProfileReady {
-				fmt.Fprintf(w, "  Browser profile: %s\n", browserProfilePath)
-				fmt.Fprintln(w, "  Browser profile is present; run `auth login-browser` again if Garmin rejects a write.")
+				return authErr(fmt.Errorf("no saved Garmin login"))
 			}
 			return nil
 		},
 	}
-}
-
-func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
-	return &cobra.Command{
-		Use:     "set-token <token>",
-		Short:   "Save an API token to the credentials file",
-		Example: "  garmin-connect-workout-cli auth set-token YOUR_TOKEN_HERE",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(flags.configPath)
-			if err != nil {
-				return configErr(err)
-			}
-
-			// Clear any legacy auth_header so AuthHeader() falls through to
-			// the newly-saved credential. Without this, a pre-existing
-			// auth_header value (common after regenerate) shadows the saved
-			// token and set-token silently has no effect. Silent clear (no
-			// log line): a masked-tail variant could leak token bytes through
-			// scripted dogfood that captures stderr.
-			cfg.AuthHeaderVal = ""
-			if err := cfg.SaveTokens("", "", args[0], "", cfg.TokenExpiry); err != nil {
-				return configErr(fmt.Errorf("saving token: %w", err))
-			}
-
-			savePath := credentialSavePath(cfg)
-			// JSON envelope: {saved, config_path, credentials_path}.
-			if flags.asJSON {
-				out := map[string]any{
-					"saved":       true,
-					"config_path": cfg.Path,
-				}
-				if !cfg.AgentcookieManagedByExternalStore() {
-					out["credentials_path"] = savePath
-				}
-				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Token saved to %s\n", savePath)
-			return nil
-		},
-	}
-}
-
-func credentialSavePath(cfg *config.Config) string {
-	if cfg != nil && cfg.AgentcookieManagedByExternalStore() {
-		return cfg.Path
-	}
-	if path, err := cliutil.CredentialsFilePath(); err == nil {
-		return path
-	}
-	if cfg != nil {
-		return cfg.Path
-	}
-	return ""
 }
 
 func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:     "logout",
-		Short:   "Clear stored credentials",
+		Short:   "Clear the saved Garmin browser profile and session",
 		Example: "  garmin-connect-workout-cli auth logout",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(flags.configPath)
-			if err != nil {
-				return configErr(err)
-			}
-
-			if err := cfg.ClearTokens(); err != nil {
-				return configErr(fmt.Errorf("clearing tokens: %w", err))
-			}
 			if err := garminsession.Clear(); err != nil {
 				return configErr(fmt.Errorf("clearing Garmin browser session: %w", err))
 			}
@@ -814,27 +643,10 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 				return configErr(fmt.Errorf("clearing Garmin browser profile: %w", err))
 			}
 
-			// Identify which (if any) auth env var is still exported so the
-			// JSON envelope and the human prose can both surface it.
-			envStillSet := ""
-			if envStillSet == "" && os.Getenv("GARMIN_CONNECT_ACCESS_TOKEN") != "" {
-				envStillSet = "GARMIN_CONNECT_ACCESS_TOKEN"
-			}
-
-			// JSON envelope: {cleared: true, note?: "<env_var> env var is still set"}.
 			if flags.asJSON {
-				out := map[string]any{"cleared": true}
-				if envStillSet != "" {
-					out["note"] = envStillSet + " env var is still set"
-				}
-				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
+				return printJSONFiltered(cmd.OutOrStdout(), map[string]any{"cleared": true}, flags)
 			}
-
-			if envStillSet != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "Config cleared. Note: %s env var is still set.\n", envStillSet)
-				return nil
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Logged out. Credentials cleared.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Logged out. Saved Garmin browser profile and session cleared.")
 			return nil
 		},
 	}

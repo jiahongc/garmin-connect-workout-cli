@@ -5,6 +5,8 @@ package cli
 import (
 	"io"
 	"testing"
+
+	"garmin-connect-workout-cli/internal/workoutdraft"
 )
 
 // TestNovelWorkoutsSyncCheckHelpWires smoke-tests that the workouts sync-check command
@@ -21,28 +23,22 @@ func TestNovelWorkoutsSyncCheckHelpWires(t *testing.T) {
 	}
 }
 
-// TestNovelWorkoutsSyncCheckBehavior is the placeholder for table-driven tests of
-// the workouts sync-check command's actual behavior. Replace the t.Skip with
-// real cases — reviewers will flag a shipped t.Skip.
-//
-// Suggested shape:
-//
-//	func TestNovelWorkoutsSyncCheckBehavior(t *testing.T) {
-//	    cases := []struct {
-//	        name  string
-//	        input ...
-//	        want  ...
-//	    }{
-//	        // {name: "...", input: ..., want: ...},
-//	    }
-//	    for _, tc := range cases {
-//	        tc := tc
-//	        t.Run(tc.name, func(t *testing.T) {
-//	            t.Parallel()
-//	            // assertions here
-//	        })
-//	    }
-//	}
-func TestNovelWorkoutsSyncCheckBehavior(t *testing.T) {
-	t.Skip("TODO: implement table-driven tests for workouts sync-check")
+func TestDraftScheduledOnRequiresScheduleEntry(t *testing.T) {
+	cases := []struct {
+		name  string
+		draft workoutdraft.Draft
+		date  string
+		want  bool
+	}{
+		{"not uploaded", workoutdraft.Draft{Date: "2026-10-07"}, "2026-10-07", false},
+		{"uploaded with --no-schedule", workoutdraft.Draft{Date: "2026-10-07", UploadedWorkout: "1"}, "2026-10-07", false},
+		{"scheduled on date", workoutdraft.Draft{UploadedWorkout: "1", ScheduledID: "2", ScheduledDate: "2026-10-07"}, "2026-10-07", true},
+		{"scheduled on other date", workoutdraft.Draft{Date: "2026-10-07", UploadedWorkout: "1", ScheduledID: "2", ScheduledDate: "2026-10-08"}, "2026-10-07", false},
+		{"scheduled, no date filter", workoutdraft.Draft{UploadedWorkout: "1", ScheduledID: "2", ScheduledDate: "2026-10-08"}, "", true},
+	}
+	for _, tc := range cases {
+		if got := draftScheduledOn(tc.draft, tc.date); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

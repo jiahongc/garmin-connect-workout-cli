@@ -12,6 +12,7 @@ import (
 	"garmin-connect-workout-cli/internal/garminsession"
 	"garmin-connect-workout-cli/internal/types"
 	"garmin-connect-workout-cli/internal/workoutdraft"
+
 	"github.com/spf13/cobra"
 )
 
@@ -95,7 +96,7 @@ on HTTP 429.`,
 
 			results := make([]map[string]any, 0, len(items))
 			fmt.Fprintln(cmd.ErrOrStderr(), "Reusing the verified Garmin session headlessly for the complete workout batch.")
-			err = runGarminBrowserWithSession(cmd.Context(), profileDir, *webSession, true, loginTimeout, func(browserCtx context.Context) error {
+			err = runGarminBrowserWithSession(cmd.Context(), profileDir, *webSession, garminBrowserDefaultHeadless(), loginTimeout, func(browserCtx context.Context) error {
 				session := newGarminBrowserMutationSession(browserCtx)
 				if err := session.discoverBase(); err != nil {
 					return err

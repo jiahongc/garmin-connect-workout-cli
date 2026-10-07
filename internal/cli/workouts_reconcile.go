@@ -14,6 +14,7 @@ import (
 
 	"garmin-connect-workout-cli/internal/garminsession"
 	"garmin-connect-workout-cli/internal/types"
+
 	"github.com/spf13/cobra"
 )
 
